@@ -25,7 +25,11 @@ func main() {
 
 ## interface 底层结构
 
-根据 `interface` 是否包含有 `method`，底层实现上用两种 `struct` 来表示：`iface`和 `eface`。`eface` 表示不含 method 的 interface 结构，或者叫 `empty interface`。对于 Golang 中的大部分数据类型都可以抽象出来 `_type` 结构，同时针对不同的类型还会有一些其他信息。
+Go的interface源码在Golang源码的 `runtime` 目录中。 不同版本之间的interface结构可能会有所不同，但是，整体的结构是不会改变的。
+
+根据 `interface` 是否包含有 `method`，底层实现上用两种 `struct` 来表示：`iface`和 `eface`。`eface` 表示不含 method 的 interface 结构，或者叫 `empty interface`。
+
+对于 Golang 中的大部分数据类型都可以抽象出来 `_type` 结构，同时针对不同的类型还会有一些其他信息。
 
 ```go
 type eface struct {
@@ -352,13 +356,166 @@ func assertE2I(inter *interfacetype, e eface) (r iface)
 func assertE2I2(inter *interfacetype, e eface) (r iface, b bool)
 ```
 
+## interface 与 nil 比较
+
+```go
+package main
+
+import (
+	"fmt"
+	"reflect"
+)
+
+type State struct{}
+
+func testnil1(a, b interface{}) bool {
+	return a == b
+}
+
+func testnil2(a *State, b interface{}) bool {
+	return a == b
+}
+
+func testnil3(a interface{}) bool {
+	return a == nil
+}
+
+func testnil4(a *State) bool {
+	return a == nil
+}
+
+func testnil5(a interface{}) bool {
+	v := reflect.ValueOf(a)
+	return !v.IsValid() || v.IsNil()
+}
+
+func main() {
+	var a *State
+	fmt.Println(testnil1(a, nil))
+	fmt.Println(testnil2(a, nil))
+	fmt.Println(testnil3(a))
+	fmt.Println(testnil4(a))
+	fmt.Println(testnil5(a))
+}
+```
+
+返回结果为
+
+```bash
+false
+false
+false
+true
+true
+```
+
+原因在与 一个 `interface{}` 类型的变量包含了2个指针，一个指针指向值的类型，另外一个指针指向实际的值 对一个 `interface{}` 类型的 `nil` 变量来说，它的两个指针都是0；但是 `var a *State` 传进去后，指向的类型的指针不为0了，因为有类型了， 所以比较为 `false` 。 interface 类型比较， 要是 两个指针都相等， 才能相等。
+
+## interface 类型转换
+
+有两种方式可以生成一个新的 interface。
+
+* 从 interface 生成 interface， 
+* 从非 interface 生成 interface , 根据原对象的 `type` 和 值生成对应的 `type` 和 `data`
+
+## interface 相等判断小结
+
+### 与 nil 比较
+
+interface 包含type和data 两个字段，只有当两个字段都为 nil 时， 才等于 nil，否则不等
+
+```go
+func main() {
+    var i interface{} = (*int)nil
+    fmt.Println(i == nil)            // false 因为类型为 *int
+}
+```
+
+### 与 interface 比较
+
+首先比较两个接口是否是相同类型
+
+* 同一接口
+* 不同接口，但是方法定义相同
+* 不同接口，其中一个包含另一个的所有方法
+
+ 然后在判断内容是否相同，只有两个字段 `type` 和`data` 都相等的时候两个 interface 才相等。
+
+```go
+type I interface{}
+type I1 interface {
+	f1()
+}
+
+type I11 interface {
+	f1()
+}
+
+type I2 interface {
+	f2()
+}
+
+type I3 interface {
+	f1()
+	f2()
+}
+
+type I4 interface {
+	f1()
+	f3()
+}
+
+type P struct{}
+
+func (P) f1() {}
+func (P) f2() {}
+func (P) f3() {}
+
+func main() {
+
+	p := P{}
+	var iEmpty I = p
+	var if1 I1 = p
+	var if1Alias I11 = p
+	
+	fmt.Println(iEmpty == if1)        // true 空interface 与 包含 f1 定义接口
+	fmt.Println(if1 == if1Alias)      // true 接口方法相同，但是接口名称不同
+
+	var if2 I2 = p
+	fmt.Println(iEmpty == if2)        // true 空interface 与 包含 f2 定义接口
+	// fmt.Println(if1 == if2)        // 编译不通过 invalid operation: i1 == i2 (mismatched types I1 and I2)
+
+	var if1f2 I3 = p
+	fmt.Println(if1 == if1f2)         // true if1f2 包含 if1 中所有方法
+
+	var if1f3 I4 = p
+	// fmt.Println(if1f2 == if1f3)   // 编译不通过 invalid operation: if1f2 == if1f3 (mismatched types I3 and I4)
+	fmt.Println(if1 == if1f3)        // true  if1f3 包含 if1中所有方法
+}
+```
+
+### 与其他类型比较
+
+与非 interface 进行比较时，先判断 interface 的类型与比较对象的类型是否相等，如果相等在比较值是否相等，否则不相等。
+
+```go
+func equal(i interface{}, v int) {
+    return i == v
+}
+
+func main() {
+    i := 1
+    fmt.Println(equal(i, i)) // true
+}
+```
+
 {% hint style="info" %}
 
 
  Super-powers are granted randomly so please submit an issue if you're not happy with yours.
 {% endhint %}
 
-Once you're strong enough, save the world:
+ou're strong enough, save the world:
 
 {% code title="hello.sh" %}
 ```bash
