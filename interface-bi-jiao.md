@@ -4,7 +4,7 @@
 
 interface 相等比较的时候常会出现一些比较迷惑的行为，如下：
 
-{% code title="" %}
+{% code title="intertest.go" %}
 ```go
 type T interface {
 	f1()
