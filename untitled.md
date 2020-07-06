@@ -1,204 +1,94 @@
 # Untitled
 
-## 通过 profiling 定位 golang 性能问题 - 内存篇
-
-* 张威虎
-
-发布于：2019 年 9 月 19 日 14:13
-
-> 线上性能问题的定位和优化是程序员进阶的必经之路，定位问题的方式有多种多样，常见的有观察线程栈、排查日志和做性能分析。性能分析（profile）作为定位性能问题的大杀器，它可以收集程序执行过程中的具体事件，并且对程序进行抽样统计，从而能更精准的定位问题。本文会以 go 语言的 pprof 工具为例，分享两个线上性能故障排查过程，希望能通过本文使大家对性能分析有更深入的理解。
-
-在遇到线上的性能问题时，面对几百个接口、成吨的日志，如何定位具体是哪里的代码导致的问题呢？这篇文章会分享一下 profiling 这个定位性能问题的利器，内容主要有：
-
-* 如何通过做 profiling 来精准定位故障源头
-* 两个工作中通过 profiling 解决性能问题的实际例子
-* 总结在做 profiling 时如何通过一些简单的现象来快速定位问题的排查方向
-* 日常 golang 编码时要避开的一些坑
-* 部分 golang 源码解析
-
-文章篇幅略长，也可直接翻到下面看经验总结。
-
-### 1.profiling 是什么
-
-profile 一般被称为 性能分析，词典上的翻译是 概况（名词）或者 描述…的概况（动词）。对于计算机程序来说，它的 profile，就是一个程序在运行时的各种概况信息，包括 cpu 占用情况，内存情况，线程情况，线程阻塞情况等等。知道了程序的这些信息，也就能容易的定位程序中的问题和故障原因。
-
-golang 对于 profiling 支持的比较好，标准库就提供了 profile 库 “runtime/pprof” 和 “net/http/pprof”，而且也提供了很多好用的可视化工具来辅助开发者做 profiling。
-
-### 2. 两次 profiling 线上实战
-
-纸上得来终觉浅，下面分享两个在工作中实际遇到的线上问题，以及我是如何通过 profiling 一步一步定位到问题的。
-
-#### cpu 占用 99%
-
-某天早上一到公司就收到了线上 cpu 占用率过高的报警。立即去看监控，发现这个故障主要有下面四个特征：
-
-* cpu idle 基本掉到了 0% ，内存使用量有小幅度增长但不严重；
-* 故障是偶发的，不是持续存在的；
-* 故障发生时 3 台机器的 cpu 几乎是同时掉底；
-* 故障发生后，两个小时左右能恢复正常。
-
-现象如图，上为内存，下为 cpu idle：
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/56/c7/5662e86f70f17f79fc8747da2051fcc7.png)
-
-检查完监控之后，立即又去检查了一下有没有影响线上业务。看了一下线上接口返回值和延迟，基本上还都能保持正常使用，就算 cpu 占用 99% 时接口延时也只比平常多了几十 ms。由于不影响线上业务，所以没有选择立即回滚，而是决定在线上定位问题（而且前一天后端也确实没有上线新东西）。
-
-所以给线上环境加上了 pprof，等着这个故障自己复现。代码如下：复制代码
-
-```text
-import _ "net/http/pprof" func main() {    go func() {        log.Println(http.ListenAndServe("0.0.0.0:8005", nil))    }()    // ..... 下面业务代码不用动}
-```
-
-golang 对于 profiling 的支持比较完善，如代码所示，只需要简单的引入 “net/http/pprof” 这个包，然后在 main 函数里启动一个 http server 就相当于给线上服务加上 profiling 了，通过访问 8005 这个 http 端口就可以对程序做采样分析。
-
-服务上开启 pprof 之后，在本地电脑上使用 go tool pprof 命令，可以对线上程序发起采样请求，golang pprof 工具会把采样结果绘制成一个漂亮的前端页面供人们排查问题。
-
-等到故障再次复现时，我们首先对 cpu 性能进行采样分析：复制代码
-
-```text
-brew install graphviz # 安装 graphviz，只需要安装一次就行了 go tool pprof -http=:1234 http://your-prd-addr:8005/debug/pprof/profile?seconds=30 
-```
-
-打开 terminal，输入上面命令，把命令中的 your-prd-addr 改成线上某台机器的地址，然后回车等待 30 秒后，会自动在浏览器中打开一个页面，这个页面包含了刚刚 30 秒内对线上 cpu 占用情况的一个概要分析。点击左上角的 View 选择 Flame graph，会用火焰图（Flame graph）来显示 cpu 的占用情况：
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/d8/c6/d867aaa1726da943c92e881f3008c0c6.png)
-
-分析此图可以发现，cpu 资源的半壁江山都被 GetLeadCallRecordByLeadId 这个函数占用了，这个函数里占用 cpu 最多的又大多是数据库访问相关的函数调用。由于 GetLeadCallRecordByLeadId 此函数业务逻辑较为复杂，数据库访问较多，不太好具体排查是哪里出的问题，所以我把这个方向的排查先暂时搁置，把注意力放到了右边那另外半壁江山。
-
-在火焰图的右边，有个让我比较在意的点是 runtime.gcBgMarkWorker 函数，这个函数是 golang 垃圾回收相关的函数，用于标记（mark）出所有是垃圾的对象。一般情况下此函数不会占用这么多的 cpu，出现这种情况一般都是内存 gc 问题，但是刚刚的监控上看内存占用只比平常多了几百 M，并没有特别高又是为什么呢？原因是影响 GC 性能的一般都不是内存的占用量，而是对象的数量。举例说明，10 个 100m 的对象和一亿个 10 字节的对象占用内存几乎一样大，但是回收起来一亿个小对象肯定会被 10 个大对象要慢很多。
-
-插一段 golang 垃圾回收的知识，golang 使用“三色标记法”作为垃圾回收算法，是“标记 - 清除法”的一个改进，相比“标记 - 清除法”优点在于它的标记（mark）的过程是并发的，不会 Stop The World。但缺点是对于巨量的小对象处理起来比较不擅长，有可能出现垃圾的产生速度比收集的速度还快的情况。gcMark 线程占用高很大几率就是对象产生速度大于垃圾回收速度了。
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/3b/d9/3b23c839845b0a6d54a7d848184be7d9.png)三色标记法
-
-所以转换方向，又对内存做了一下 profiling：复制代码
-
-```text
-go tool pprof http://your-prd-addr:8005/debug/pprof/heap 
-```
-
-然后在浏览器里点击左上角 VIEW-》flame graph，然后点击 SAMPLE-》inuse\_objects。
-
-这样显示的是当前的对象数量：
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/87/02/87e425208e255a6f6320e4806cd43e02.png)
-
-可以看到，还是 GetLeadCallRecordByLeadId 这个函数的问题，它自己就产生了 1 亿个对象，远超其他函数。所以下一步排查问题的方向确定了是：定位为何此函数产生了如此多的对象。
-
-之后我开始在日志中 grep ‘/getLeadCallRecord’ lead-platform. 来一点一点翻，重点看 cpu 掉底那个时刻附近的日志有没有什么异常。果然发现了一条比较异常的日志：复制代码
-
-```text
-[net/http.HandlerFunc.ServeHTTP/server.go:1947] _com_request_in||traceid=091d682895eda2fsdffsd0cbe3f9a95||spanid=297b2a9sdfsdfsdfb8bf739||hintCode=||hintContent=||method=GET||host=10.88.128.40:8000||uri=/lp-api/v2/leadCallRecord/getLeadCallRecord||params=leadId={"id":123123}||from=10.0.0.0||proto=HTTP/1.0
-```
-
-注意看 params 那里，leadId 本应该是一个 int，但是前端给传来一个 JSON，推测应该是前一天上线带上去的 bug。但是还有问题解释不清楚，类型传错应该报错，但是为何会产生这么多对象呢？于是我进代码（已简化）里看了看：复制代码
-
-```text
-func GetLeadCallRecord(leadId string, bizType int) ([]model.LeadCallRecords, error) {sql := "SELECT record.* FROM lead_call_record AS record " +"where record.lead_id  = {{leadId}} and record.biz_type = {{bizType}}"conditions := make(map[string]interface{}, 2)conditions["leadId"] = leadIdconditions["bizType"] = bizTypecond, val, err := builder.NamedQuery(sql, conditions)
-```
-
-发现很尴尬的是，这段远古代码里对于 leadId 根本没有判断类型，直接用 string 了，前端传什么过来都直接当作 sql 参数了。也不知道为什么 mysql 很抽风的是，虽然 lead\_id 字段类型是 bigint，在 sql 里条件用 string 类型传参数 WHERE leadId = ‘someString’ 也能查到数据，而且返回的数据量很大。本身 lead\_call\_record 就是千万级别的大表，这个查询一下子返回了几十万条数据。又因为此接口后续的查询都是根据这个这个查询返回的数据进行查询的，所以整个请求一下子就产生了上亿个对象。
-
-由于之前传参都是正确的，所以一直没有触发这个问题，正好前一天前端小姐姐上线需求带上了这个 bug，一波前后端混合双打造成了这次故障。
-
-到此为止就终于定位到了问题所在，而且最一开始的四个现象也能解释的通了：
-
-* cpu idle 基本掉到了 0% ，内存使用量有小幅度增长但不严重；
-* 故障是偶发的，不是持续存在的；
-* 故障发生时 3 台机器的 cpu 几乎是同时掉底；
-* 故障发生后，两个小时左右能恢复正常。
-
-逐条解释一下：
-
-* GetLeadCallRecordByLeadId 函数每次在执行时从数据库取回的数据量过大，大量 cpu 时间浪费在反序列化构造对象 和 gc 回收对象上。
-* 和前端确认 /lp-api/v2/leadCallRecord/getLeadCallRecord 接口并不是所有请求都会传入 json，只在某个页面里才会有这种情况，所以故障是偶发的。
-* 因为接口并没有直接挂掉报错，而是执行的很慢，所以应用前面的负载均衡会超时，负载均衡器会把请求打到另一台机器上，结果每次都会导致三台机器同时爆表。
-* 虽然申请了上亿个对象，但 golang 的垃圾回收器是真滴靠谱，兢兢业业的回收了两个多小时之后，就把几亿个对象全回收回去了，而且奇迹般的没有影响线上业务。几亿个对象都扛得住，只能说厉害了我的 go。
-
-最后捋一下整个过程：
-
-cpu 占用 99% -&gt; 发现 GC 线程占用率持续异常 -&gt; 怀疑是内存问题 -&gt; 排查对象数量 -&gt; 定位产生对象异常多的接口 -&gt; 定位到某接口 -&gt; 在日志中找到此接口的异常请求 -&gt; 根据异常参数排查代码中的问题 -&gt; 定位到问题
-
-可以发现，有 pprof 工具在手的话，整个排查问题的过程都不会懵逼，基本上一直都照着正确的方向一步一步定位到问题根源。这就是用 profiling 的优点所在。
-
-#### 内存占用 90%
-
-第二个例子是某天周会上有同学反馈说项目内存占用达到了 15 个 G 之多，看了一下监控现象如下：
-
-* cpu 占用并不高，最低 idle 也有 85%
-* 内存占用呈锯齿形持续上升，且速度很快，半个月就从 2G 达到了 15G
-
-如果所示：
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/4a/62/4a2f9bfa781d58c41c0273313209f662.png)
-
-锯齿是因为昼夜高峰平峰导致的暂时不用管，但持续上涨很明显的是内存泄漏的问题，有对象在持续产生，并且被持续引用着导致释放不掉。于是上了 pprof 然后准备等一晚上再排查，让它先泄露一下再看现象会比较明显。
-
-这次重点看内存的 inuse\_space 图，和 inuse\_objects 图不同的是，这个图表示的是具体的内存占用而不是对象数，然后 VIEW 类型也选 graph，比火焰图更清晰。
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/bf/5b/bf8a1fe45ecd0dcbe27b5e1860b60f5b.png)
-
-这个图可以明显的看出来程序中 92% 的对象都是由于 event.GetInstance 产生的。然后令人在意的点是这个函数产生的对象都是一个只有 16 个字节的对象（看图上那个 16B）这个是什么原因导致的后面会解释。
-
-先来看这个函数的代码吧：复制代码
-
-```text
-var (    firstActivationEventHandler FirstActivationEventHandler    firstOnlineEventHandler FirstOnlineEventHandler)func GetInstance(eventType string) Handler {    if eventType == FirstActivation {        firstActivationEventHandler.ChildHandler = firstActivationEventHandlerreturn firstActivationEventHandler    } else if eventType == FirstOnline {        firstOnlineEventHandler.ChildHandler = firstOnlineEventHandlerreturn firstOnlineEventHandler}// ... 各种类似的判断，略过    return nil}
-```
-
-这个是做一个类似单例模式的功能，根据事件类型返回不同的 Handler。但是这个函数有问题的点有两个：
-
-* firstActivationEventHandler.ChildHandler 是一个 interface，在给一个 interface 赋值的时候，如果等号右边是一个 struct，会进行值传递，也就意味着每次赋值都会在堆上复制一个此 struct 的副本。（golang 默认都是值传递）
-* firstActivationEventHandler.ChildHandler = firstActivationEventHandler 是一个自己引用自己循环引用。
-
-两个问题导致了每次 GetInstance 函数在被调用的时候，都会复制一份之前的 firstActivationEventHandler 在堆上，并且让 firstActivationEventHandler.ChildHandler 引用指向到这个副本上。
-
-这就导致人为在内存里创造了一个巨型的链表：
-
-![&#x901A;&#x8FC7; profiling &#x5B9A;&#x4F4D; golang &#x6027;&#x80FD;&#x95EE;&#x9898; - &#x5185;&#x5B58;&#x7BC7;](https://static001.infoq.cn/resource/image/9e/bd/9e0838b1575a9d969dd6a6972f61dfbd.png)
-
-并且这个链表中所有节点都被之后的副本引用着，永远无法被 GC 当作垃圾释放掉。
-
-所以解决这个问题方案也很简单，单例模式只需要在 init 函数里初始化一次就够了，没必要在每次 GetInstance 的时候做初始化操作：复制代码
-
-```text
-func init() {    firstActivationEventHandler.ChildHandler = &firstActivationEventHandler    firstOnlineEventHandler.ChildHandler = &firstOnlineEventHandler// ... 略过}
-```
-
-另外，可以深究一下为什么都是一个 16B 的对象呢？为什么 interface 会复制呢？这里贴一下 golang runtime 关于 interface 部分的源码：
-
-下面分析 golang 源码，不感兴趣可直接略过。复制代码
-
-```text
-// interface 底层定义type iface struct {    tab  *itab    data unsafe.Pointer}// 空 interface 底层定义type eface struct {    _type *_type    data  unsafe.Pointer}// 将某变量转换为 interfacefunc convT2I(tab *itab, elem unsafe.Pointer) (i iface) {    t := tab._type    if raceenabled {        raceReadObjectPC(t, elem, getcallerpc(), funcPC(convT2I))    }    if msanenabled {        msanread(elem, t.size)    }    x := mallocgc(t.size, t, true)    typedmemmove(t, x, elem)    i.tab = tab    i.data = x    return}
-```
-
-iface 这个 struct 是 interface 在内存中实际的布局。可以看到，在 golang 中定义一个 interface，实际上在内存中是一个 tab 指针和一个 data 指针，目前的机器都是 64 位的，一个指针占用 8 个字节，两个就是 16B。
-
-我们的 firstActivationEventHandler 里面只有一个 ChildHandler interface，所以整个 firstActivationEventHandler 占用 16 个字节也就不奇怪了。
-
-另外看代码第 20 行那里，可以看到每次把变量转为 interface 时是会做一次 mallocgc\(t.size, t, true\) 操作的，这个操作就会在堆上分配一个副本，第 21 行 typedmemmove\(t, x, elem\) 会进行复制，会复制变量到堆上的副本上。这就解释了开头的问题。
-
-### 3. 经验总结
-
-在做内存问题相关的 profiling 时：
-
-* 若 gc 相关函数占用异常，可重点排查对象数量
-* 解决速度问题（CPU 占用）时，关注对象数量（ --inuse/alloc\_objects ）指标
-* 解决内存占用问题时，关注分配空间（ --inuse/alloc\_space ）指标
-
-inuse 代表当前时刻的内存情况，alloc 代表从从程序启动到当前时刻累计的内存情况，一般情况下看 inuse 指标更重要一些，但某些时候两张图对比着看也能有些意外发现。
-
-在日常 golang 编码时：
-
-* 参数类型要检查，尤其是 sql 参数要检查（低级错误）
-* 传递 struct 尽量使用指针，减少复制和内存占用消耗（尤其对于赋值给 interface，会分配到堆上，额外增加 gc 消耗）
-* 尽量不使用循环引用，除非逻辑真的需要
-* 能在初始化中做的事就不要放到每次调用的时候做
-
-**本文转载自公众号滴滴技术（ID：didi\_tech）。**
-
-**原文链接：**
-
-[https://mp.weixin.qq.com/s/B8lJI\_2BfMcz-Rd1bNjkyg](https://mp.weixin.qq.com/s/B8lJI_2BfMcz-Rd1bNjkyg)
+## 
+
+| 参数组 | 参数 | 描述 |
+| :--- | :--- | :--- |
+| url | url | 需要抓取的一到多个URLs； 多个下面通配符的方式： 　　1、http://{www,ftp,mail}.aiezu.com； 　　2、http://aiezu.com/images/\[001-999\].jpg； 　　3、http://aiezu.com/images/\[1-999\].html； 　　4、ftp://aiezu.com/file\[a-z\].txt |
+| 请 求 头 | -H "name: value" --header "name: value" | \(HTTP\)添加一个http header\(http请求头\)； |
+| -H "name:" --header "name:" | \(HTTP\)移除一个http header\(http请求头\)； |  |
+| -A "string" --user-agent "string" [【参考】](http://aiezu.com/article/linux_curl_referer_useragent.html) | \(HTTP\)设置Http请求头“User-Agent”，服务器通过“User-Agent”可以判断客户端使用的浏览器名称和操作系统类型，伪造此参数能导致服务器做出错误判断。 也可以使用“-H”, “--header option”设置此选项； |  |
+| -e &lt;URL&gt; --referer &lt;URL&gt; [【参考】](http://aiezu.com/article/linux_curl_referer_useragent.html) | \(HTTP\)设置访问时的来源页面，告诉http服务从哪个页面进入到此页面； -e "aiezu.com"相当于“-H "Referer: www.qq.com"”； |  |
+| 响 应 头 | -I --head | \(HTTP\)只输出HTTP-header，不获取内容\(HTTP/FTP/FILE\)。 用于HTTP服务时，获取页面的http头；   （如：curl -I http://aiezu.com） 用于FTP/FILE时，将会获取文件大小、最后修改时间；   （如：curl -I file://test.txt） |
+| -i --include | \(HTTP\)输出HTTP头和返回内容； |  |
+| -D &lt;file&gt; --dump-header &lt;file&gt; | \(HTTP\)转储http响应头到指定文件； |  |
+| cookie | -b name=data --cookie name=data [【参考】](http://aiezu.com/article/linux_curl_http_cookie.html) | \(HTTP\)发送cookie数据到HTTP服务器，数据格式为："NAME1=VALUE1; NAME2=VALUE2"；  如果行中没有“=”，将把参数值当作cookie文件名；  这个cookie数据可以是由服务器的http响应头“Set-Cookie:”行发送过来的； |
+| -c filename --cookie-jar file name [【参考】](http://aiezu.com/article/linux_curl_http_cookie.html) | \(HTTP\)完成操作后将服务器返回的cookies保存到指定的文件； 指定参数值为“-”将定向到标准输出“如控制台”； |  |
+| -j --junk-session-cookies | \(HTTP\)告诉curl放弃所有的"session cookies"； 相当于重启浏览器； |  |
+| 代理 | -x host:port -x \[protocol://\[user:pwd@\]host\[:port\] --proxy \[protocol://\[user:pwd@\]host\[:port\] [【参考】](http://aiezu.com/article/linux_curl_proxy_http_socks.html) | 使用HTTP代理访问；如果未指定端口，默认使用8080端口; protocol默认为http\_proxy，其他可能的值包括： http\_proxy、HTTPS\_PROXY、socks4、socks4a、socks5； 如： --proxy 8.8.8.8:8080； -x "http\_proxy://aiezu:123@aiezu.com:80" |
+| -p --proxytunnel | 将“-x”参数的代理，作为通道的方式去代理非HTTP协议，如ftp； |  |
+| --socks4 &lt;host\[:port\]&gt; --socks4a &lt;host\[:port\]&gt; --socks5 &lt;host\[:port\]&gt; [【参考】](http://aiezu.com/article/linux_curl_proxy_http_socks.html) | 使用SOCKS4代理； 使用SOCKS4A代理； 使用SOCKS5代理； 此参数会覆盖“-x”参数； |  |
+| --proxy-anyauth --proxy-basic --proxy-diges --proxy-negotiate --proxy-ntlm | http代理认证方式，参考： --anyauth --basic --diges --negotiate --ntlm |  |
+| -U &lt;user:password&gt; --proxy-user &lt;user:password&gt; | 设置代理的用户名和密码； |  |
+| 数据 传输 | -G --get [【参考】](http://aiezu.com/article/linux_curl_getpost_datafile_json.html) | 如果使用了此参数，“-d/”、“--data”、“--data-binary”参数设置的数据，讲附加在url上，以GET的方式请求；  |
+| -d @file -d "string" --data "string" --data-ascii "string" --data-binary "string" --data-urlencode "string" [【参考】](http://aiezu.com/article/linux_curl_getpost_datafile_json.html) | \(HTTP\)使用HTTP POST方式发送“key/value对”数据，相当于浏览器表单属性（method="POST"，enctype="application/x-www-form-urlencoded"） 　　-d，--data：HTTP方式POST数据； 　　--data-ascii：HTTP方式POST ascii数据； 　　--data-binary：HTTP方式POST二进制数据； 　　--data-urlencode：HTTP方式POST数据（进行urlencode）； 如果数据以“@”开头，后紧跟一个文件，将post文件内的内容； |  |
+| -F name=@file -F name=&lt;file -F name=content --form name=content [【参考】](http://aiezu.com/article/linux_curl_getpost_datafile_json.html) | \(HTTP\)使用HTTP POST方式发送类似“表单字段”的多类型数据，相当于同时设置浏览器表单属性（method="POST"，enctype="multipart/form-data"），可以使用此参数上传二进制文件。  如果字段内容以“@”开头，剩下的部分应该是文件名，curl将会上传此文件，如： curl -F "pic=@pic.jpg" http://aiezu.com； curl -F "page=@a.html;type=text/html" http://aiezu.com curl -F "page=@/tmp/a;filename=a.txt" http://aiezu.com  如果字段内容以“&lt;”开头，剩下的部分应该是文件名，curl将从文件中获取作为此字段的值，如：curl -F "text=&lt;text.txt" http://aiezu.com； |  |
+| --form-string &lt;key=value&gt; | \(HTTP\)类似于“--form”，但是“@”、“&lt;”无特殊含义； |  |
+| -T file --upload-file file | 通过“put”的方式将文件传输到远程网址；  选项参数只使用字符"-"，将通过stdin读入文件内容； 如： cat test.txt\|curl "http://aiezu.com/a.php" -T -  curl "http://aiezu.com/a.php" -T - &lt;test.txt  此参数也可以使用通配符： curl -T "{file1,file2}" http://aiezu.com curl -T "img\[1-1000\].png" http://aiezu.com |  |
+| 断点 续传 | -C &lt;offset&gt; --continue-at &lt;offset&gt; | 断点续转，从文件头的指定位置开始继续下载/上传； offset续传开始的位置，如果offset值为“-”，curl会自动从文件中识别起始位置开始传输； |
+| -r &lt;range&gt; --range &lt;range&gt; | \(HTTP/FTP/SFTP/FILE\) 只传输内容的指定部分： 0-499：最前面500字节； -500：最后面500字节； 9500-：最前面9500字节； 0-0,-1：最前面和最后面的1字节； 100-199,500-599：两个100字节； |  |
+|    认证 | --basic | \(HTTP\)告诉curl使用HTTP Basic authentication（HTTP协议时），这是默认认证方式； |
+| --ntlm | \(HTTP\)使用NTLM身份验证方式，用于HTTP协议； 一般用于IIS使用NTLM的网站； |  |
+| --digest | \(HTTP\)使用HTTP Digest authentication加密，用于HTTP协议； 配合“-u/--user”选项，防止密码使用明文方式发送； |  |
+| --negotiate | \(HTTP\)使用GSS-Negotiate authentication方式，用于HTTP协议； 它主要目的是为它的主要目的是为kerberos5认证提供支持支持； |  |
+| --anyauth | \(HTTP\)告诉curl自动选择合适的身份认证方法，并选用最安全的方式； |  |
+| -u user:password --user user:password | 使用用户名、密码认证，此参数会覆盖“-n”、“--netrc”和“--netrc-optional”选项；  如果你只提供用户名，curl将要求你输入密码；  如果你使用“SSPI”开启的curl库做“NTLM”认证，可以使用不含用户名密码的“-u:”选项，强制curl使用当前登录的用户名密码进行认证；  此参数相当于设置http头“Authorization：”； |  |
+| 证书 | -E &lt;证书\[:密码\]&gt; --cert &lt;证书\[:密码\]&gt; | \(SSL\)指定“PEM”格式的证书文件和证书密码； |
+| --cert-type &lt;type&gt; | \(SSL\)告诉curl所提供证书的类型：PEM、DER、ENG等； 默认为“PEM”； |  |
+| --cacert &lt;CA证书&gt; | \(SSL\)告诉curl所以指定的CA证书文件，必须是“PEM”格式； |  |
+| --capath &lt;CA证书路径&gt; | \(SSL\)告诉curl所以指定目录下的CA证书用来验证； 这些证书必须是“PEM”格式； |  |
+| --crlfile &lt;file&gt; | \(HTTPS/FTPS\)提供一个PEM格式的文件，用于指定被吊销的证书列表； |  |
+| -k --insecure | \(SSL\)设置此选项将允许使用无证书的不安全SSL进行连接和传输。 |  |
+| SSL 其他 | --ciphers &lt;list of ciphers&gt; | \(SSL\)指定SSL要使用的加密方式；如：“aes\_256\_sha\_256”； |
+| --engine &lt;name&gt; | 设置一个OpenSSL加密引擎用于加密操作； 使用“curl --engine list”查看支持的加密引擎列表； |  |
+| --random-file | \(SSL\)指定包含随机数据的文件路径名；数据是用来为SSL连接产生随机种子为； |  |
+| --egd-file &lt;file&gt; | \(SSL\)为随机种子生成器EGD\(Entropy Gathering Daemon socket\)指定的路径名； |  |
+| -1/--tlsv1 --tlsv1.0 --tlsv1.1 --tlsv1.2 -2/--sslv2 -3/--sslv3 | \(SSL\)使用TLS版本2与远程服务器通讯； \(SSL\)使用TLS 1.0版本与远程服务器通讯； \(SSL\)使用TLS 1.1版本与远程服务器通讯； \(SSL\)使用TLS 1.2版本与远程服务器通讯； \(SSL\)使用SSL版本2与远程服务器通讯； \(SSL\)使用SSL版本3与远程服务器通讯； |  |
+| 私钥 公钥 | --key &lt;key&gt; | \(SSL/SSH\)指定一个私钥文件名；为指定时自动尝试使用下面文件：“~/.ssh/id\_rsa”、“~/.ssh/id\_dsa”、“./id\_rsa'”、 “./id\_dsa”； |
+| --key-type &lt;type&gt; | \(SSL\)指定私钥文件类型，支持：DER、PEM、ENG，默认是PEM； |  |
+| --pass &lt;phrase&gt; | \(SSL/SSH\)指定私钥文件的密码； |  |
+| --pubkey &lt;key&gt; | \(SSH\)使用指定文件提供的您公钥； |  |
+| FTP | -P --ftp-port &lt;接口&gt; | \(FTP\)FTP主动模式时，设置一个地址等待服务器的连接，如： 网卡：eth1 IP：8.8.8.8 主机名：aiezu.com 可以加端口号：eth1:20000-21000; |
+| --crlf | \(FTP\)上传时将换行符\(LF\)转换为回车换行\(CRLF\)； |  |
+| --ftp-account \[data\] | \(FTP\)ftp帐号信息； |  |
+| --ftp-method \[method\] | \(FTP\)可选值：multicwd/nocwd/singlecwd； |  |
+| --ftp-pasv | \(FTP\)使用使用PASV\(被动\)/EPSV模式； |  |
+| --ftp-skip-pasv-ip | \(FTP\)使用PASV的时,跳过指定IP； |  |
+| --ftp-create-dirs | \(FTP\)上传时自动创建远程目录； |  |
+| -l --list-only | \(FTP\)列出ftp文件列表； |  |
+| -B --use-ascii | \(FTP/LDAP\)使用Ascii传输模式，用于FTP、LDAP；在ftp中相当与使用了“type=A;”模式。 |  |
+| --disable-epsv | \(FTP\)告诉curl在PASV\(被动模式\)时不要使用EPSV； |  |
+| --disable-eprt | \(FTP\)告诉curl在主动模式时禁用EPRT和LPRT； |  |
+| 限速 | --limit-rate &lt;speed&gt; | 限制curl使用的最大带宽；如果未指定单位，默认单位为“bytes/秒”，你也可以指定单位为“K”、“M”、“G”等单位，如：“--limit-rate 1m”为限制最大使用带宽为“1m字节/秒”； |
+| -y --speed-time &lt;time&gt; | If a download is slower than speed-limit bytes per second during a speed-time period, the download gets aborted. If speed-time is used, the default speed-limit will be 1 unless set with -Y. This option controls transfers and thus will not affect slow connects etc. If this is a concern for you, try the --connect-timeout option. |  |
+| -Y --speed-limit &lt;speed&gt; | If a download is slower than this given speed \(in bytes per second\) for speed-time seconds it gets aborted. speed-time is set with -y and is 30 if not set. |  |
+| 其他 选项 | -0/--http1.0 | \(HTTP\) 强制curl使用HTTP 1.0而不是使用默认的HTTP 1.1； |
+| --interface &lt;name&gt; | 使用指定的网卡接口访问； curl --interface eth0 http://aiezu.com curl --interface 10.0.0.101 http://aiezu.com |  |
+| -X &lt;command&gt; --request &lt;command&gt; | （HTTP）指定与服务器通信使用的请求方法，如：GET、PUT、POST、DELETE等，默认GET； |  |
+| --keepalive-time &lt;seconds&gt; | 设置keepalive时间 |  |
+| --no-keepalive | 关闭keepalive功能； |  |
+| --no-buffer | 禁用对输出流缓冲； |  |
+| --buffer | 启用输出流缓冲； |  |
+| -L --location | \(HTTP/HTTPS\)追随http响应头“Location：”定向到跳转后的页面； \(在http响应码为3XX时使用，如301跳转、302跳转\) |  |
+| --location-trusted | \(HTTP/HTTPS\)同“--location”，但跳转后会发送跳转前的用户名和密码； |  |
+| --compressed | \(HTTP\)请求对返回内容使用压缩算法进行压缩；curl支持对gzip压缩进行解压； |  |
+| --connect-timeout &lt;seconds&gt; | 指定最大连接超时，单位“秒”； |  |
+| -m seconds --max-time seconds | 限制整个curl操作的最长时间，单位为秒； |  |
+| -s --silent | 安静模式。不要显示进度表或错误消息； |  |
+| -\# --progress-bar | 显示进度条； |  |
+| 错误 选项 | -f --fail | \(HTTP\)连接失败时（400以上错误）不返回默认错误页面，而是返回一个curl错误码“22”； |
+| --retry &lt;num&gt; --retry-delay &lt;seconds&gt; --retry-max-time &lt;seconds&gt; | 失败重试次数； 重试间隔时间； 最大重试时间； |  |
+| -S --show-error | 安静模式下显示错误信息； |  |
+| --stderr &lt;file&gt; | 错误信息保存文件； |  |
+| 输出 | -o file --output file | 将返回内容输出到文件。 如果是用过通配符获取多个url，可以使用“\#”后跟“数字序号”，curl会自动将它替换对应的关键词，如： 　　curl "http://aiezu.com/{a,b}.txt" -o "\#1.txt"; 　　将保存为：“a.txt”,“b.txt”;  　　curl "http://aiezu.com/{a,b}\_\[1-3\].txt" -o "\#1\#2.txt"; 　　将保存为：a1.txt、a2.txt、a3.txt、b1.txt、b2.txt、b3.txt  　　如果要根据规则创建保存目录，参考：“--create-dirs”  指定“-”将定向到标准输出“如控制台”；  |
+| -O --remote-name | 将返回内容输出到当前目录下，和url中文件名相同的文件中（不含目录）； |  |
+| --create-dirs | 与“-o”参数配合使用，创建必要的本地目录层次结构 |  |
+| -w --write-out format | 操作完成后在返回信息尾部追加指定的内容；要追加的内容可以是一个字符串“string”、从文件中获取“@filename”、从标准输入中获取“@-”  格式参数中可以用%{variable\_name} 方式使用响应信息的相关变量，如：%{content\_type}、%{http\_code}、%{local\_ip}...，更多变量参考“man curl”获取；  格式参数可以使用“\n”、“\r”、“\t”等转义字符； |  |
+| 调试 | --trace &lt;file&gt; | 转储所有传入和传出的数据到文件，包括描述信息； 使用“-”作为文件名将输出发送到标准输出。 |
+| --trace-ascii file | 转储所有传入和传出的数据到文件，包括描述信息，只转储ASCII部分，更容易阅读； 使用“-”作为文件名将输出发送到标准输出。 这个选项会覆盖之前使用的-v、 --verbose、 --trace-ascii选项； |  |
+| --trace-time | 转储文件中添加时间信息； |  |
+| -K --config &lt;config file&gt; | 从配置文件中读取参数，参考：http://curl.haxx.se/docs/ |  |
+| -v --verbose | 显示更详细的信息，调试时使用； |  |
+| 帮助 | -M --manual | 显示完整的帮助手册； |
+| -h --help | linux curl用法帮助； |  |
 
