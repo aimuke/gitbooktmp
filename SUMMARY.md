@@ -7,6 +7,8 @@
 * [肇兴侗寨](zhao-xing-dong-zhai.md)
 * [小七孔](xiao-qi-kong.md)
 * [西江千户苗寨](xi-jiang-qian-hu-miao-zhai.md)
+* [游记](you-ji/README.md)
+  * [飞扬跋扈的猪](you-ji/fei-yang-ba-hu-de-zhu.md)
 * [梵净山](fan-jing-shan.md)
 * [贵阳](gui-yang/README.md)
   * [甲秀楼](gui-yang/jia-xiu-lou.md)
