@@ -5,6 +5,7 @@
 * [行程](hang-cheng.md)
 * [平塘天眼景区（中国天眼）](interface-bi-jiao.md)
 * [肇兴侗寨](zhao-xing-dong-zhai.md)
+* [小七孔](xiao-qi-kong.md)
 * [西江千户苗寨](xi-jiang-qian-hu-miao-zhai.md)
 * [梵净山](fan-jing-shan.md)
 * [贵阳](gui-yang/README.md)
