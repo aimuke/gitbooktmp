@@ -25,4 +25,5 @@
 * [Pilot MCP协议介绍](pilot-mcp-xie-yi-jie-shao.md)
 * [centos如何安装软件](centos-ru-he-an-zhuang-ruan-jian.md)
 * [how to set http proxy for linux](how-to-set-http-proxy-for-linux.md)
+* [SSH 远程执行任务](ssh-yuan-cheng-zhi-hang-ren-wu.md)
 
