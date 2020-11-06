@@ -1,58 +1,190 @@
-# how to set http proxy for linux
+# Unix bash – 操作多行字符串变量
 
-说明：为什么说是http代理，其实这个还不能说是全程走代理，最明显的区别就是ICMP协议这个设置就无效，只能说是90%的应用都可以使用这个设置来实现代理访问，只有个别不行，比如一些软件根本不走http协议的，那么此种方法绝对不行；下面是讲解http的代理配置，以后会讲解全局级别的代理实现，其实也就是网关，配置网关绝对能100%，这里不做讲解。全局代理配置主要在于环境变量的设置。
-
-还有网上很多都说http配置代理不支持socks协议，其实是不对的。我测试的结果已经支持了。
-
-个人理解：我谈一下这个http\_proxy的设置，首先，设置了这个变量不是说只会走http协议，上面我说的应该是普通认为会这样说的说法，我后面觉得上面已经是错误了，比如curl，git这些软件默认使用http\_proxy这个环境变量来设置代理服务器，所以在linux下只要设置了这个环境变量就能被这些软件识别，而对于代理服务器用什么协议都行，比如使用http协议或者socks协议等。
-
-那么对于一些比如chrome和yum这些针对http\_proxy可能不会生效，比如chrome用的是server\_proxy这个变量，而且是在启动时设置才生效。
-
-下面是代理变量的配置：
-
-| 环境变量 | 描述 | 值示例 |
-| :--- | :--- | :--- |
-| http\_proxy | 为http变量设置代理；默认不填开头以http协议传输 | 10.0.0.51:8080 user:pass@10.0.0.10:8080 socks4://10.0.0.51:1080 socks5://192.168.1.1:1080 |
-| https\_proxy | 为https变量设置代理； | 同上 |
-| ftp\_proxy | 为ftp变量设置代理； | 同上 |
-| all\_proxy | 全部变量设置代理，设置了这个时候上面的不用设置 | 同上 |
-| no\_proxy | 无需代理的主机或域名； 可以使用通配符； 多个时使用“,”号分隔； | \*.aiezu.com,10.\*.\*.\*,192.168.\*.\*, \*.local,localhost,127.0.0.1  |
-
-针对上面变量的设置方法：
-
-* 在/etc/profile文件
-* 在~/.bashrc
-* 在~/.zshrc
-* 在/etc/profile.d/文件夹下新建一个文件xxx.sh
-
-写入如下配置：
+当我们在 shell 的 bash 里操作多行内容的字符串,我们往往会想到普通的字符串处理办法 例如:
 
 ```text
-export proxy="http://192.168.5.14:8118"
-export http_proxy=$proxy
-export https_proxy=$proxy
-export ftp_proxy=$proxy
-export no_proxy="localhost, 127.0.0.1, ::1"
+string="Hello linux"
+echo $string
 ```
 
-而对于要取消设置可以使用如下命令，其实也就是取消环境变量的设置：
+其实 bash 提供了一个非常好的解决办法,就是 “Multi-line”
+
+## 变量注入
+
+e.g. 包含变量
 
 ```text
-unset http_proxy
-unset https_proxy
-unset ftp_proxy
-unset no_proxy
+cat > myfile.txt <<EOF
+this file has $variable $names $inside
+EOF
+
+# 注入文档到 myfile.txt
+cat myfile.txt
+#输入:
+#this file has
+
+variable="ONE"
+names="TWO"
+inside="expanded variables"
+
+cat > myfile.txt <<EOF
+this file has $variable $names $inside
+EOF
+
+#print out the content of myfile.txt
+cat myfile.txt
+#输入:
+#this file has ONE TWO expanded variables
 ```
 
-针对yum配置走代理：
+## 不注入变量值
 
-经过测试其实只要设置上面的变量之后已经可以走代理了，但如果要单独设置，可以设置如下文件的变量：
+PS: 引用符号 "EOF" 决定是否需要输入变量
 
 ```text
-echo "proxy=http://127.0.0.1:8080/" >> /etc/yum.conf
+cat > myfile.txt <<"EOF"
+this file has $variable $dollar $name $inside
+EOF
+
+cat myfile.txt
+#得到
+#this file has $variable $dollar $name $inside
+```
+
+转义 dollar "$" 符号,bash将取消变量的解析
+
+```text
+cat > myfile.txt <<EOF
+this file has $variable \$dollar \$name \$inside
+EOF
+
+cat myfile.txt
+# 得到
+# this file has $variable $dollar $name $inside
+
+
+```
+
+## 将多行文本赋值到变量
+
+例1: 变量注入
+
+```text
+read -d '' stringvar <<-"_EOF_"
+
+all the leading dollars in the $variable $name are $retained
+
+_EOF_
+# 输入变量
+echo $stringvar;
+# all the leading dollars in the $variable $name are $retained
+```
+
+例2:直接定义，换行符被删除,引号含义变化
+
+```text
+VARIABLE1="<?xml version="1.0" encoding='UTF-8'?>
+<report>
+  <img src="a-vs-b.jpg"/>
+  <caption>Thus is a future post on Multi Line Strings in bash
+  <date>1511</date>-<date>1512</date>.</caption>
+</report>"
+
+echo $VARIABLE1
+# <?xml version=1.0 encoding='UTF-8'?> <report> <img src=a-vs-b.jpg/> <caption>Thus is a future post on Multi Line Strings in bash <date>1511</date>-<date>1512</date>.</caption> </report>
+```
+
+> 注意： 定义变量的时候，version 后面的 1.0 是有引号的，输出后，引号没了
+
+例3:使用cat 原样保留了原定义的数据
+
+```text
+VARIABLE2=$(cat <<EOF
+<?xml version="1.0" encoding='UTF-8'?>
+<report>
+  <img src="a-vs-b.jpg"/>
+  <caption>Thus is a future post on Multi Line Strings in bash
+  <date>1511</date>-<date>1512</date>.</caption>
+</report>
+EOF
+)
+echo $VARIABLE2
+#<?xml version="1.0" encoding='UTF-8'?> <report> <img src="a-vs-b.jpg"/> <caption>Thus is a future post on Multi Line Strings in bash <date>1511</date>-<date>1512</date>.</caption> </report>
+```
+
+同上，输出内容与原定义内容相同
+
+```text
+VARABLE3=`cat <<EOF
+<?xml version="1.0" encoding='UTF-8'?>
+<report>
+  <img src="a-vs-b.jpg"/>
+  <caption>Thus is a future post on Multi Line Strings in bash
+  <date>1511</date>-<date>1512</date>.</caption>
+</report>
+EOF`
+```
+
+例8:
+
+```text
+tee aa.txt << EOF
+echo "Hello World 20314"
+EOF
+
+cat aa.txt
+#echo "Hello World 20314"
+```
+
+例如10:
+
+```text
+sudo sh -c "cat > /aaa.txt" <<"EOT"
+this text gets saved as sudo - $10 - ten dollars ...
+EOT
+
+cat /aaa.txt
+#this text gets saved as sudo - $10 - ten dollars ...
+```
+
+例11:
+
+```text
+cat << "EOF" | sudo tee /aaa.txt
+let's count
+$one
+two
+$three
+four
+
+EOF
+
+cat /aaa.txt
+#let's count
+#$one
+#two
+#$three
+#four
+```
+
+关于 tee
+
+```text
+> tee –help
+Usage: tee [OPTION]… [FILE]…
+Copy standard input to each FILE, and also to standard output.
+-a, –append append to the given FILEs, do not overwrite
+-i, –ignore-interrupts ignore interrupt signals
+–help display this help and exit
+–version output version information and exit
+If a FILE is -, copy again to standard output.
+Report tee bugs to bug-coreutils@gnu.org
+GNU coreutils home page:
+General help using GNU software:
+For complete documentation, run: info coreutils ‘tee invocation’
 ```
 
 ## References
 
-[Linux/CentOS设置全局代理（http）](https://www.cnblogs.com/EasonJim/p/9826681.html)
+* [原文 bash – 操作多行字符串变](https://whatua.com/2018/02/24/unix-bash-%E6%93%8D%E4%BD%9C%E5%A4%9A%E8%A1%8C%E5%AD%97%E7%AC%A6%E4%B8%B2%E5%8F%98%E9%87%8F/) ， [WHOMM](https://whatua.com/author/mxroot/)
 

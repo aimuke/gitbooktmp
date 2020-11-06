@@ -24,6 +24,6 @@
   * [龙宫风景区](untitled/long-gong-feng-jing-qu.md)
 * [Pilot MCP协议介绍](pilot-mcp-xie-yi-jie-shao.md)
 * [centos如何安装软件](centos-ru-he-an-zhuang-ruan-jian.md)
-* [how to set http proxy for linux](how-to-set-http-proxy-for-linux.md)
+* [Unix bash – 操作多行字符串变量](how-to-set-http-proxy-for-linux.md)
 * [SSH 远程执行任务](ssh-yuan-cheng-zhi-hang-ren-wu.md)
 
