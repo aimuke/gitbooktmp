@@ -27,4 +27,5 @@
 * [Unix bash – 操作多行字符串变量](how-to-set-http-proxy-for-linux.md)
 * [SSH 远程执行任务](ssh-yuan-cheng-zhi-hang-ren-wu.md)
 * [Prometheus 入门与实践](prometheus-ru-men-yu-shi-jian.md)
+* [一些需要了解的问题](yi-xie-xu-yao-le-jie-de-wen-ti.md)
 
