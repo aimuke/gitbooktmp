@@ -5,6 +5,7 @@
 * k8s  各组件的功能
 * 各种资源的含义，比如 deployment 和 ReplicaSet，有了 deployment 为什么还要ReplicaSet
 * k8s 中一个服务访问另外一个服务的过程
+* pod 中 k8s\_POD 容器的作用
 
 ## 证书
 
