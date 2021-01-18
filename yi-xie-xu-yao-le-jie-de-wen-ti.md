@@ -17,6 +17,10 @@
 * 服务端口为什么需要命名
 * listener 中 filter 是使用 port 来进行分组的，为什么不使用ip 来进行分组。（tcp和https 是使用ip分组的）
 
+## http
+
+HTTP2 与 http1 的区别，如何实现？
+
 
 
 
