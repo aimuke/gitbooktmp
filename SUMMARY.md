@@ -30,4 +30,5 @@
 * [一些需要了解的问题](yi-xie-xu-yao-le-jie-de-wen-ti.md)
 * [HTTP1.0、HTTP1.1 和 HTTP2.0 的区别](http1.0http1.1-he-http2.0-de-qu-bie.md)
 * [Golang 单元测试指引](golang-dan-yuan-ce-shi-zhi-yin.md)
+* [Permissions masking with umask, chmod, 777 octal permissions](permissions-masking-with-umask-chmod-777-octal-permissions.md)
 
