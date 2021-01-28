@@ -31,5 +31,5 @@
 * [HTTP1.0、HTTP1.1 和 HTTP2.0 的区别](http1.0http1.1-he-http2.0-de-qu-bie.md)
 * [Golang 单元测试指引](golang-dan-yuan-ce-shi-zhi-yin.md)
 * [Permissions masking with umask, chmod, 777 octal permissions](permissions-masking-with-umask-chmod-777-octal-permissions.md)
-* [linux 环境变量](linux-huan-jing-bian-liang.md)
+* [Accessing Kubernetes CRDs from the client-go package](linux-huan-jing-bian-liang.md)
 

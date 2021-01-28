@@ -1,113 +1,529 @@
-# linux 环境变量
+# Accessing Kubernetes CRDs from the client-go package
 
-## 变量分类
+[origin address ](https://www.martin-helmich.de/en/blog/kubernetes-crd-client.html) Written on 28. März 2018, Updated on 15. April 2020 by Martin Helmich  
 
-linux 中变量分两种：
+The Kubernetes API server is easily extendable by [Custom Resource Defintions](https://kubernetes.io/docs/tasks/access-kubernetes-api/extend-api-custom-resource-definitions/). However, actually accessing these resources from the popular [client-go](https://github.com/kubernetes/client-go) library is a bit more complex and not thoroughly documented. This article contains a short guide on how to access Kubernetes CRDs from your own Go code \(**UPDATED 2020/04** to adjust to API changes in recent `client-go` versions, using Go modules and doing \(some\) code generation with `controller-gen`\).
 
-* **用户变量**：对用户生效的变量，同一个用户登录的时候都有效， 使用 env 访问
-* **shell 变量**：当前shell 中的变量，包含了shell 对应用户的变量， 使用 set 访问
+## Motivation
 
-**shell 导出的用户变量**：将 shell 中定义的变量导出为用户变量，使用export 导出后可以使用env 访问
+I came across this challenge while wanting to integrate a third-party storage vendor into a Kubernetes cluster in my day job at [Mittwald](https://karriere.mittwald.de/). The plan was to use Custom Resource Definitions to define things like _Filesystem Pools_ and _Filesystems_. Then, a custom Operator could listen for these resources being created and deleted and take care of the actual provisioning of these resources.
 
-## set env export区别
+## Defining and creating a Custom Resource
 
-* **set**: 显示\(设置\)shell变量 包括的私有变量以及用户变量，不同类的shell有不同的私有变量 bash,ksh,csh每中shell私有变量都不一样
-* **env**: 显示\(设置\)用户变量变量
-* **export**: 显示\(设置\)当前导出成用户变量的shell变量。
+For this article, we’ll work with an easy example: Custom Resource Definitions can be easily created using `kubectl`, and for this example, we will start with a single simple resource definition:
 
-举个例子来讲:
-
-```bash
-[oracle@zhou3 ~]$ aaa=bbb --shell变量设定   
-[oracle@zhou3 ~]$ echo $aaa    
-bbb   
-[oracle@zhou3 ~]$ env| grep aaa --设置完当前用户变量并没有   
-[oracle@zhou3 ~]$ set| grep aaa  --shell变量有   
-aaa=bbb   
-[oracle@zhou3 ~]$ export| grep aaa --这个指的export也没导出，导出变量也没有   
-[oracle@zhou3 ~]$ export aaa   --那么用export 导出一下   
-[oracle@zhou3 ~]$ env| grep aaa  --发现用户变量内存在了   
-aaa=bbb
+```yaml
+ apiVersion: "apiextensions.k8s.io/v1beta1"
+ kind: "CustomResourceDefinition"
+ metadata:
+   name: "projects.example.martin-helmich.de"
+ spec:
+   group: "example.martin-helmich.de"
+   version: "v1alpha1"
+   scope: "Namespaced"
+   names:
+     plural: "projects"
+     singular: "project"
+     kind: "Project"
+   validation:
+     openAPIV3Schema:
+       required: ["spec"]
+       properties:
+         spec:
+           required: ["replicas"]
+           properties:
+             replicas:
+               type: "integer"
+               minimum: 1
 ```
 
-**总结:** linux 分 shell变量\(set\)，用户变量\(env\)， shell变量包含用户变量，export是一种命令工具，是显示那些通过export命令把shell变量中包含的用户变量导入给用户变量的那些变量.
+For defining a Custom Resource Definition, you will need to think of an _API Group Name_ \(in this case, `example.martin-helmich.de`\). By convention, this is usually the Domain Name of a domain that you control \(for example, your organization’s domain\) in order to prevent naming conflicts. The CRD’s name then follows the pattern `<plural-resource-name>.<api-group-name>`, so in this case `projects.example.martin-helmich.de`.
 
-## 删除环境变量
+Also, be careful when choosing your definition version \(`spec.version` in the example above\). As long as your definitions are still evolving, it’s usually a good idea to declare your first definition with an _alpha_ API group version. To users of your custom resource, this will clearly communicate that the definitions might still change, later.
 
-使用unset命令来清除环境变量，注意`set`， `env`，  `export`设置的变量，都可以用unset来清除的
+Often, you want to validate the data that users store in your custom resources against a certain schema. This is what the `spec.validation.openAPIV3Schema` is for: This contains a [JSON Schema](https://json-schema.org/) that describes the format that your resources should have.
 
-```bash
-清除环境变量的值用unset命令。如果未指定值，则该变量值将被 设为NULL。示
-例如下：  
-$ export TEST="Test..." #增加一个环境变量TEST  
-$ env|grep TEST #此命令有输入，证明环境变量TEST已经存在了  
-TEST=Test...  
-$ unset $TEST #删除环境变量TEST  
-$ env|grep TEST #此命令没有输出，证明环境变量TEST已经不存在了
-```
-
-## 使用readonly命令设置只读变量
+After saving the CRD in a file, you can use `kubectl` to create your resource definition:
 
 ```bash
-使用了readonly命令的话，变量就不可以被修改或清除了。示例如下：
-$ export TEST="Test..." #增加一个环境变量TEST
-$ readonly TEST #将环境变量TEST设为只读
-$ unset TEST #会发现此变量不能被删除
--bash: unset: TEST: cannot unset: readonly variable
-$ TEST="New" #会发现此也变量不能被修改
--bash: TEST: readonly variable
+> kubectl apply -f projects-crd.yaml
+customresourcedefinition "projects.example.martin-helmich.de" created
 ```
 
-##  修改用户变量
+After you have created your Custom Resource Definition, you can create instances of this new resource type. These are defined like regular Kubernetes objects \(like, for example, Pods, Deployments and others\). Only the `kind` and `apiVersion` vary:
 
-最根本的设置、更改变量的配置文件
+```yaml
+apiVersion: "example.martin-helmich.de/v1alpha1"
+kind: "Project"
+metadata:
+  name: "example-project"
+  namespace: "default"
+spec:
+  replicas: 1
+```
 
-* `~/.bash_profile`  用户登录时被读取，其中包含的命令被执行
-* `~/.bashrc`  启动新的shell时被读取，并执行
-* `~/.bash_logout`  shell 登录退出时被读取
-
-此外，shell（这里指bash）的初始化过程是这样的：
-
-1. bash检查文件 /etc/profile 是否存在, 存在bash 就读取该文件，否则跳过
-2. bash检查主目录下的文件.bash\_profile 是否存在, 存在就读取該文件，否则跳过
-3. bash检查主目录下的.bash\_login 是否存在， 存在就读取该文件，否则跳过
-4. bash检查主目录下的文件.profile 是否存在， 存在就读取该文件，否则跳过。
-
-这些步骤都执行完后，就出现提示符了， ksh 默认提示符是 `$`.
-
-> 修改配置文件中的用户变量后，需要重新加载一遍对应的脚本数据才会生效。比如: 修改了 /.bash\_profile 中的 PATH ，需要重新执行一下  `source ~/.bash_profile` 后才会生效
-
-## 常见的shell变量
-
-* PATH 包含了一系列由冒号分隔开的目录，系统就从这些目录里寻找可执行文件。如果你输入的可执行文件（例如ls、rc-update或者emerge） 不在这些目录中，系统就无法执行它（除非你输入这个命令的完整路径，如/bin/ls）。 
-* ROOTPATH 功能和PATH相同，但它只罗列出超级用户（root）键入命令时所需检查的目录。
-* LDPATH 包含了一系列用冒号隔开的目录，动态链接器将在这些目录里查找库文件。
-* MANPATH 包含了一系列用冒号隔开的目录，命令man会在这些目录里搜索man页面。 
-* INFODIR 包含了一系列用冒号隔开的目录，命令info将在这些目录里搜索info页面。 
-* PAGER 包含了浏览文件内容的程序的路径（例如less或者more）。 
-* EDITOR 包含了修改文件内容的程序（文件编辑器）的路径（比如nano或者vi）。 
-* KDEDIRS 包含了一系列用冒号隔开的目录，里面放的是KDE相关的资料。
-* CONFIG\_PROTECT包含了一系列用空格隔开的目录，它们在更新的时候会被Portage保护起来。
-* CONFIG\_PROTECT\_MASK 包含了一系列用空格隔开的目录，它们在更新的时候不会被Portage保护起来。
-
-
-
-* PATH：决定了shell将到哪些目录中寻找命令或程序
-* HOME：当前用户主目录
-* MAIL：是指当前用户的邮件存放目录。
-* SHELL：是指当前用户用的是哪种Shell。
-* HISTSIZE：是指保存历史命令记录的条数
-* LOGNAME：是指当前用户的登录名。
-* HOSTNAME：是指主机的名称，许多应用程序如果要用到主机名的话，通常是从这个环境变量中来取得的。
-* LANG/LANGUGE：是和语言相关的环境变量，使用多种语言的用户可以修改此环境变量。
-* PS1：是基本提示符，对于root用户是\#，对于普通用户是$。
-* PS2：是附属提示符，默认是“&gt;”。可以通过修改此环境变量来修改当前的命令符，比如下列命令会将提示符修改成字符串“Hello,My NewPrompt :\) ”。
+You can create custom resources like any other object with `kubectl`:
 
 ```bash
-# PS1=" Hello,My NewPrompt :) "
+> kubectl apply -f project.yaml
+project "example-project" created
 ```
 
-## References
+You can even use `kubectl get` to retrieve your custom resources back from the Kubernetes API. Most other commands like `kubectl edit`, `apply` or `delete` will work, as well:
 
-* [shell环境变量以及set,env,export的区别](https://blog.csdn.net/longxibendi/article/details/6125075?utm_medium=distribute.pc_relevant.none-task-blog-BlogCommendFromBaidu-1.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-BlogCommendFromBaidu-1.control) , 凤凰舞者 qq:578989855 
+```bash
+> kubectl get projects
+NAME               AGE
+example-project    2m
+```
+
+## Creating a Golang client
+
+Next, we’ll use the [client-go](https://github.com/kubernetes/client-go) package to access these custom resources. For this example, I’ll assume that you are working in a Go project with the package name `github.com/martin-helmich/kubernetes-crd-example` \(yes, that repository [actually exists](https://github.com/martin-helmich/kubernetes-crd-example)\) and have the `client-go` and `apimachinery` libraries installed as Go modules:
+
+```go
+go mod init github.com/martin-helmich/kubernetes-crd-example
+go get k8s.io/client-go@v0.17.0
+go get k8s.io/apimachinery@v0.17.0
+```
+
+**Note** Many documentations working with CRDs will assume that you are working with some kind of code generation to generate client libraries automatically. However, this process is documented sparsely, and from reading a few heated discussions on Github, I got the impression that it's still very much a work-in-progress. We'll stick with a \(mostly\) manually implemented client, for now.
+
+### Step 1: Define types
+
+Start by defining the types for your custom resource. I’ve found it to be a good practice to organize these types by the API group version; for example, you could create a file `api/types/v1alpha1/project.go` with the following contents:
+
+```go
+ package v1alpha1
+ 
+ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ type ProjectSpec struct {
+     Replicas int `json:"replicas"`
+ }
+  
+ type Project struct {
+ 	metav1.TypeMeta   `json:",inline"`
+ 	metav1.ObjectMeta `json:"metadata,omitempty"`
+ 
+     Spec ProjectSpec `json:"spec"`
+ }
+ 
+ type ProjectList struct {
+ 	metav1.TypeMeta `json:",inline"`
+ 	metav1.ListMeta `json:"metadata,omitempty"`
+ 
+ 	Items []Project `json:"items"`
+}
+```
+
+The `metav1.ObjectMeta` type contains the typical `metadata` properties that you can find in any Kubernetes resource \(like for example, the `name`, `namespace`, `labels` and `annotations`\).
+
+### Step 2: Define DeepCopy methods
+
+Each type that is being served by the Kubernetes API \(in this case, `Project` and `ProjectList`\) needs to implement the `k8s.io/apimachinery/pkg/runtime.Object` interface. This interface defines the two methods `GetObjectKind()` and `DeepCopyObject()`. The first method is already provided by the embedded `metav1.TypeMeta` struct; the second you’ll have to implement yourself.
+
+The `DeepCopyObject` method is intended to generate a [deep copy](https://en.wikipedia.org/wiki/Object_copying#Deep_copy) of an object. Since this involves a lot of boilerplate code, these methods are often automatically generated. For the sake of this article, we’ll do it manually. Continue by adding a second file `deepcopy.go` to the same package:
+
+```go
+ package v1alpha1
+ 
+ import "k8s.io/apimachinery/pkg/runtime"
+ 
+ // DeepCopyInto copies all properties of this object into another object of the
+ // same type that is provided as a pointer.
+func (in *Project) DeepCopyInto(out *Project) {
+     out.TypeMeta = in.TypeMeta
+     out.ObjectMeta = in.ObjectMeta
+     out.Spec = ProjectSpec{
+        Replicas: in.Spec.Replicas,
+     }
+}
+ 
+ // DeepCopyObject returns a generically typed copy of an object
+ func (in *Project) DeepCopyObject() runtime.Object {
+     out := Project{}
+     in.DeepCopyInto(&out)
+ 
+     return &out
+ }
+ 
+ // DeepCopyObject returns a generically typed copy of an object
+ func (in *ProjectList) DeepCopyObject() runtime.Object {
+     out := ProjectList{}
+     out.TypeMeta = in.TypeMeta
+     out.ListMeta = in.ListMeta
+ 
+     if in.Items != nil {
+         out.Items = make([]Project, len(in.Items))
+         for i := range in.Items {
+             in.Items[i].DeepCopyInto(&out.Items[i])
+         }
+     }
+ 
+   return &out
+}
+```
+
+#### Interlude: Generate the `DeepCopy` methods automatically <a id="interlude-generate-the-deepcopy-methods-automatically"></a>
+
+OK - you may have already noticed that defining all these various `DeepCopy` methods is not a lot of fun. There are many different tools and frameworks around to automatically generate these methods \(all with very different levels of documentation and overall maturity\). The one that I’ve found works best is the `controller-gen` tool, which is part of the [Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) framework:
+
+```bash
+$ go get -u github.com/kubernetes-sigs/controller-tools/cmd/controller-gen
+```
+
+To use `controller-gen`, annotate your CRD types with a `+k8s:deepcopy-gen` annotation:
+
+```go
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type Project struct {
+    // ...
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type ProjectList struct {
+    // ...
+}
+```
+
+Then, run `controller-gen object paths=./api/types/v1alpha1/project.go` to automatically generate the deepcopy methods.
+
+To make things even more easy, you could add a [`go:generate` statement](https://blog.golang.org/generate) to the entire file:
+
+```go
+package v1alpha1
+
+import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+//go:generate controller-gen object paths=$GOFILE
+
+// ...
+```
+
+Then, just run `go generate ./...` in your root directory to update the generated code.
+
+### Step 3: Register types at the scheme builder
+
+Next, you’ll need to make your new types known to the client library. This will allow the client to \(more or less\) automatically process your new types when communicating with the API server.
+
+For this, add a new file `register.go` to your package:
+
+```go
+package v1alpha1
+
+import (
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+    "k8s.io/apimachinery/pkg/runtime"
+    "k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+const GroupName = "example.martin-helmich.de"
+const GroupVersion = "v1alpha1"
+
+var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: GroupVersion}
+
+var (
+    SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
+    AddToScheme   = SchemeBuilder.AddToScheme
+)
+
+func addKnownTypes(scheme *runtime.Scheme) error {
+    scheme.AddKnownTypes(SchemeGroupVersion,
+        &Project{},
+        &ProjectList{},
+    )
+
+    metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+    return nil
+}
+```
+
+As you may notice, this code does not really do anything, yet \(except for creating a new `runtime.SchemeBuilder` instance\). The important part is the `AddToScheme` function \(line 16\), which is an exported struct member of the `runtime.SchemeBuilder` type created in line 15. You can call this function later from any part of your client code as soon as the Kubernetes client is initialized to register your type definitions.
+
+### Step 4: Build a HTTP client
+
+After defining types and adding a method to register them at the global scheme builder, you can now create a HTTP client that is capable of loading your custom resource.
+
+For this, add the following code to your package’s `main.go` file \(for now\):
+
+```go
+ package main
+ 
+ import (
+     "flag"
+     "log"
+     "time"
+ 
+     "k8s.io/apimachinery/pkg/runtime/schema"
+     "k8s.io/apimachinery/pkg/runtime/serializer"
+ 
+     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
+     "k8s.io/client-go/kubernetes/scheme"
+     "k8s.io/client-go/rest"
+     "k8s.io/client-go/tools/clientcmd"
+ )
+ 
+ var kubeconfig string
+ 
+ func init() {
+     flag.StringVar(&kubeconfig, "kubeconfig", "", "path to Kubernetes config file")
+     flag.Parse()
+ }
+ 
+ func main() {
+     var config *rest.Config
+     var err error
+ 
+     if kubeconfig == "" {
+         log.Printf("using in-cluster configuration")
+         config, err = rest.InClusterConfig()
+     } else {
+         log.Printf("using configuration from '%s'", kubeconfig)
+         config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+     }
+ 
+     if err != nil {
+         panic(err)
+     }
+ 
+     v1alpha1.AddToScheme(scheme.Scheme)
+ 
+     crdConfig := *config
+     crdConfig.ContentConfig.GroupVersion = &schema.GroupVersion{Group: v1alpha1.GroupName, Version: v1alpha1.GroupVersion}
+     crdConfig.APIPath = "/apis"
+     crdConfig.NegotiatedSerializer = serializer.NewCodecFactory(scheme.Scheme)
+     crdConfig.UserAgent = rest.DefaultKubernetesUserAgent()
+ 
+     exampleRestClient, err := rest.UnversionedRESTClientFor(&crdConfig)
+     if err != nil {
+         panic(err)
+     }
+ }
+```
+
+You can now use the `exampleRestClient` created in line 48 to query all custom resources within the `example.martin-helmich.de/v1alpha1` API group. An example might look like this:
+
+```go
+result := v1alpha1.ProjectList{}
+err := exampleRestClient.
+    Get().
+    Resource("projects").
+    Do().
+    Into(&result)
+```
+
+In order to use your API in a more typesafe way, it is usually a good idea to wrap these operations within your own clientset. For this, create a new subpackage `clientset/v1alpha1`. To start, implement an interface that defines the types of your API group and move the configuration setup from your `main` method into that clientset’s constructor function \(`NewForConfig` in the example below\):
+
+```go
+ package v1alpha1
+ 
+ import (
+     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
+     "k8s.io/apimachinery/pkg/runtime/schema"
+     "k8s.io/apimachinery/pkg/runtime/serializer"
+     "k8s.io/client-go/kubernetes/scheme"
+     "k8s.io/client-go/rest"
+ )
+ 
+ type ExampleV1Alpha1Interface interface {
+     Projects(namespace string) ProjectInterface 
+ }
+ 
+ type ExampleV1Alpha1Client struct {
+     restClient rest.Interface
+ }
+ 
+ func NewForConfig(c *rest.Config) (*ExampleV1Alpha1Client, error) {
+     config := *c
+     config.ContentConfig.GroupVersion = &schema.GroupVersion{Group: v1alpha1.GroupName, Version: v1alpha1.GroupVersion}
+     config.APIPath = "/apis"
+     config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+     config.UserAgent = rest.DefaultKubernetesUserAgent()
+ 
+     client, err := rest.RESTClientFor(&config)
+     if err != nil {
+         return nil, err
+     }
+ 
+     return &ExampleV1Alpha1Client{restClient: client}, nil
+ }
+ 
+ func (c *ExampleV1Alpha1Client) Projects(namespace string) ProjectInterface {
+     return &projectClient{
+         restClient: c.restClient,
+         ns: namespace,
+     }
+ }
+```
+
+The code below will not compile yet, as it’s still missing the `ProjectInterface` and `projectClient` types. We’ll get to those in a moment.
+
+The `ExampleV1Alpha1Interface` and its implementation, the `ExampleV1Alpha1Client` struct are now the central point of entry for accessing your custom resources. You can now easily create a new clientset in your `main.go` by simply calling `clientset, err := v1alpha1.NewForConfig(config)`.
+
+Next, you’ll need to implement a specific clientset for accessing the `Project` custom resource \(note that the example above already uses the `ProjectInterface` and `projectClient` types that we still need to supply\). Create a second file `projects.go` in the same package:
+
+```go
+ package v1alpha1
+ 
+ import (
+     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
+     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+     "k8s.io/apimachinery/pkg/watch"
+     "k8s.io/client-go/kubernetes/scheme"
+     "k8s.io/client-go/rest"
+ )
+ 
+ type ProjectInterface interface {
+     List(opts metav1.ListOptions) (*v1alpha1.ProjectList, error)
+     Get(name string, options metav1.GetOptions) (*v1alpha1.Project, error)
+     Create(*v1alpha1.Project) (*v1alpha1.Project, error)
+     Watch(opts metav1.ListOptions) (watch.Interface, error)
+     // ...
+ }
+ 
+ type projectClient struct {
+     restClient rest.Interface
+     ns         string
+ }
+ 
+ func (c *projectClient) List(opts metav1.ListOptions) (*v1alpha1.ProjectList, error) {
+     result := v1alpha1.ProjectList{}
+     err := c.restClient.
+         Get().
+         Namespace(c.ns).
+         Resource("projects").
+         VersionedParams(&opts, scheme.ParameterCodec).
+         Do().
+         Into(&result)
+ 
+     return &result, err
+ }
+ 
+ func (c *projectClient) Get(name string, opts metav1.GetOptions) (*v1alpha1.Project, error) {
+     result := v1alpha1.Project{}
+     err := c.restClient.
+         Get().
+         Namespace(c.ns).
+         Resource("projects").
+         Name(name).
+         VersionedParams(&opts, scheme.ParameterCodec).
+         Do().
+         Into(&result)
+ 
+     return &result, err
+ }
+ 
+ func (c *projectClient) Create(project *v1alpha1.Project) (*v1alpha1.Project, error) {
+     result := v1alpha1.Project{}
+     err := c.restClient.
+         Post().
+         Namespace(c.ns).
+         Resource("projects").
+         Body(project).
+         Do().
+         Into(&result)
+ 
+     return &result, err
+ }
+ 
+ func (c *projectClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
+     opts.Watch = true
+     return c.restClient.
+         Get().
+         Namespace(c.ns).
+         Resource("projects").
+         VersionedParams(&opts, scheme.ParameterCodec).
+         Watch()
+ }
+```
+
+This client is obviously not yet complete and misses methods like `Delete`, `Update` and others. However, these can be implemented similar to the already existing methods. Have a look at the existing client sets \(for example, the [`Pod` client set](https://github.com/kubernetes/client-go/blob/master/kubernetes/typed/core/v1/pod.go)\) for inspiration.
+
+After creating your client set, using it to list your existing resources becomes quite easy:
+
+```go
+import clientV1alpha1 "github.com/martin-helmich/kubernetes-crd-example/clientset/v1alpha1"
+// ...
+  
+func main() {
+     // ...
+ 
+     clientSet, err := clientV1alpha1.NewForConfig(config)
+     if err != nil {
+         panic(err)
+     }
+ 
+     projects, err := clientSet.Projects("default").List(metav1.ListOptions{})
+     if err != nil {
+         panic(err)
+     }
+ 
+     fmt.Printf("projects found: %+v\n", projects)
+}
+```
+
+### Step 5: Build an informer
+
+When building a Kubernetes Operator, you’ll typically want to be able to react on newly created or updated resources. In theory, you could just periodically call the `List()` method and check if new resources were added. In practice, this is a sub-optimal solution, especially when you have lots of these resources.
+
+Most operators work by initially loading all relevant instances of a resource by using an initial `List()` call, and then subscribing to updates using a `Watch()` call. The initial object list and the updates received from the watch are then used to construct a local cache that allows quick access to any custom resources without having to hit the API server every time.
+
+This pattern is so common that the client-go library offers a helper for this: the _Informer_ from the `k8s.io/client-go/tools/cache` package. You can construct a new Informer for your custom resource as follows:
+
+```go
+ package main
+  
+ import (
+     "time"
+ 
+     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
+     client_v1alpha1 "github.com/martin-helmich/kubernetes-crd-example/clientset/v1alpha1"
+     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+     "k8s.io/apimachinery/pkg/runtime"
+     "k8s.io/apimachinery/pkg/util/wait"
+     "k8s.io/apimachinery/pkg/watch"
+     "k8s.io/client-go/tools/cache"
+ )
+ 
+ func WatchResources(clientSet client_v1alpha1.ExampleV1Alpha1Interface) cache.Store {
+     projectStore, projectController := cache.NewInformer(
+         &cache.ListWatch{
+             ListFunc: func(lo metav1.ListOptions) (result runtime.Object, err error) {
+                 return clientSet.Projects("some-namespace").List(lo)
+             },
+             WatchFunc: func(lo metav1.ListOptions) (watch.Interface, error) {
+                 return clientSet.Projects("some-namespace").Watch(lo)
+             },
+         },
+         &v1alpha1.Project{},
+         1*time.Minute,
+         cache.ResourceEventHandlerFuncs{},
+     )
+ 
+     go projectController.Run(wait.NeverStop)
+     return projectStore
+ }
+```
+
+The `NewInformer` method returns two objects: The second return value, the _controller_ controls the `List()` and `Watch()` calls and fills the first return value, the _store_ with a \(more or less\) recent cache of the watched resource’s state on the API server \(in this case, the _project_ CRD\).
+
+You can now use the _store_ to easily access your CRDs, either listing them all or accessing them by name. Keep in mind that the store functions return generic `interface{}` types, so you’ll have to typecast them back to your CRD type:
+
+```go
+store := WatchResource(clientSet)
+project := store.GetByKey("some-namespace/some-project").(*v1alpha1.Project)
+```
+
+## Conclusion
+
+Building clients for Custom Resources is something that is \(at least, currently\) only sparsely documented and can be a bit tricky at times.
+
+A client library for your Custom Resource as shown in this article, along with a respective Informer is a good starting point for building your own Kubernetes operator that reacts on changes made to Custom Resources. Check the [Github project for this article](https://github.com/martin-helmich/kubernetes-crd-example) for a complete and working version.
+
+
+
+References
+
+* [Accessing Kubernetes CRDs from the client-go package](https://www.martin-helmich.de/en/blog/kubernetes-crd-client.html)
 
