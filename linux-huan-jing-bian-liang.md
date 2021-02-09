@@ -1,529 +1,143 @@
-# Accessing Kubernetes CRDs from the client-go package
+# 127.0.0.1和0.0.0.0地址的区别
 
-[origin address ](https://www.martin-helmich.de/en/blog/kubernetes-crd-client.html) Written on 28. März 2018, Updated on 15. April 2020 by Martin Helmich  
+[原文地址 127.0.0.1和0.0.0.0地址的区别](http://blog.leanote.com/post/medusar/7e371ca28621)
 
-The Kubernetes API server is easily extendable by [Custom Resource Defintions](https://kubernetes.io/docs/tasks/access-kubernetes-api/extend-api-custom-resource-definitions/). However, actually accessing these resources from the popular [client-go](https://github.com/kubernetes/client-go) library is a bit more complex and not thoroughly documented. This article contains a short guide on how to access Kubernetes CRDs from your own Go code \(**UPDATED 2020/04** to adjust to API changes in recent `client-go` versions, using Go modules and doing \(some\) code generation with `controller-gen`\).
+## 1. 问题引入
 
-## Motivation
+之前在使用tomcat的时候，启动tomcat默认都会绑定到127.0.0.1这个地址，最近在使用hexo写博客的时候发现通过 `hexo server`命令启动服务的时候绑定的ip地址是0.0.0.0。那么这两个IP地址到底有什么不同呢?  
+在讲解两个地址的不同之前，我们先回顾一下IP地址的基础知识。
 
-I came across this challenge while wanting to integrate a third-party storage vendor into a Kubernetes cluster in my day job at [Mittwald](https://karriere.mittwald.de/). The plan was to use Custom Resource Definitions to define things like _Filesystem Pools_ and _Filesystems_. Then, a custom Operator could listen for these resources being created and deleted and take care of the actual provisioning of these resources.
+## 2. IP地址分类
 
-## Defining and creating a Custom Resource
+### 2.1 IP地址表示
 
-For this article, we’ll work with an easy example: Custom Resource Definitions can be easily created using `kubectl`, and for this example, we will start with a single simple resource definition:
+IP地址由两个部分组成，`net-id` 和 `host-id`，即网络号和主机号。  
+`net-id:`表示ip地址所在的网络号。  
+`host-id:`表示ip地址所在网络中的某个主机号码。  
+即：
 
-```yaml
- apiVersion: "apiextensions.k8s.io/v1beta1"
- kind: "CustomResourceDefinition"
- metadata:
-   name: "projects.example.martin-helmich.de"
- spec:
-   group: "example.martin-helmich.de"
-   version: "v1alpha1"
-   scope: "Namespaced"
-   names:
-     plural: "projects"
-     singular: "project"
-     kind: "Project"
-   validation:
-     openAPIV3Schema:
-       required: ["spec"]
-       properties:
-         spec:
-           required: ["replicas"]
-           properties:
-             replicas:
-               type: "integer"
-               minimum: 1
+```text
+IP-address ::=  { <Network-number>, <Host-number> }
 ```
 
-For defining a Custom Resource Definition, you will need to think of an _API Group Name_ \(in this case, `example.martin-helmich.de`\). By convention, this is usually the Domain Name of a domain that you control \(for example, your organization’s domain\) in order to prevent naming conflicts. The CRD’s name then follows the pattern `<plural-resource-name>.<api-group-name>`, so in this case `projects.example.martin-helmich.de`.
+### 2.2 IP地址分类
 
-Also, be careful when choosing your definition version \(`spec.version` in the example above\). As long as your definitions are still evolving, it’s usually a good idea to declare your first definition with an _alpha_ API group version. To users of your custom resource, this will clearly communicate that the definitions might still change, later.
+IP地址一共分为5类，即A～E，它们分类的依据是其net-id所占的字节长度以及网络号前几位。
 
-Often, you want to validate the data that users store in your custom resources against a certain schema. This is what the `spec.validation.openAPIV3Schema` is for: This contains a [JSON Schema](https://json-schema.org/) that describes the format that your resources should have.
+* **A类地址**:网络号占1个字节。网络号的第一位固定为0。
+* **B类地址**：网络号占2个字节。网络号的前两位固定为10。
+* **C类地址**：网络号占3个字节。网络号的前三位固定位110。
+* **D类地址**：前四位是1110，用于多播\(multicast\)，即一对多通信。
+* **E类地址**：前四位是1111，保留为以后使用。
 
-After saving the CRD in a file, you can use `kubectl` to create your resource definition:
-
-```bash
-> kubectl apply -f projects-crd.yaml
-customresourcedefinition "projects.example.martin-helmich.de" created
-```
-
-After you have created your Custom Resource Definition, you can create instances of this new resource type. These are defined like regular Kubernetes objects \(like, for example, Pods, Deployments and others\). Only the `kind` and `apiVersion` vary:
-
-```yaml
-apiVersion: "example.martin-helmich.de/v1alpha1"
-kind: "Project"
-metadata:
-  name: "example-project"
-  namespace: "default"
-spec:
-  replicas: 1
-```
-
-You can create custom resources like any other object with `kubectl`:
-
-```bash
-> kubectl apply -f project.yaml
-project "example-project" created
-```
-
-You can even use `kubectl get` to retrieve your custom resources back from the Kubernetes API. Most other commands like `kubectl edit`, `apply` or `delete` will work, as well:
-
-```bash
-> kubectl get projects
-NAME               AGE
-example-project    2m
-```
-
-## Creating a Golang client
-
-Next, we’ll use the [client-go](https://github.com/kubernetes/client-go) package to access these custom resources. For this example, I’ll assume that you are working in a Go project with the package name `github.com/martin-helmich/kubernetes-crd-example` \(yes, that repository [actually exists](https://github.com/martin-helmich/kubernetes-crd-example)\) and have the `client-go` and `apimachinery` libraries installed as Go modules:
-
-```go
-go mod init github.com/martin-helmich/kubernetes-crd-example
-go get k8s.io/client-go@v0.17.0
-go get k8s.io/apimachinery@v0.17.0
-```
-
-**Note** Many documentations working with CRDs will assume that you are working with some kind of code generation to generate client libraries automatically. However, this process is documented sparsely, and from reading a few heated discussions on Github, I got the impression that it's still very much a work-in-progress. We'll stick with a \(mostly\) manually implemented client, for now.
-
-### Step 1: Define types
-
-Start by defining the types for your custom resource. I’ve found it to be a good practice to organize these types by the API group version; for example, you could create a file `api/types/v1alpha1/project.go` with the following contents:
-
-```go
- package v1alpha1
- 
- import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
- 
- type ProjectSpec struct {
-     Replicas int `json:"replicas"`
- }
   
- type Project struct {
- 	metav1.TypeMeta   `json:",inline"`
- 	metav1.ObjectMeta `json:"metadata,omitempty"`
- 
-     Spec ProjectSpec `json:"spec"`
- }
- 
- type ProjectList struct {
- 	metav1.TypeMeta `json:",inline"`
- 	metav1.ListMeta `json:"metadata,omitempty"`
- 
- 	Items []Project `json:"items"`
-}
-```
+其中，ABC三类地址为单播地址（unicast\),用于一对一通信，是最常用的。
 
-The `metav1.ObjectMeta` type contains the typical `metadata` properties that you can find in any Kubernetes resource \(like for example, the `name`, `namespace`, `labels` and `annotations`\).
+### 2.3 特殊IP地址
 
-### Step 2: Define DeepCopy methods
+特殊IP地址就是用来做一些特殊的事情。RFC1700中定义了以下特殊IP地址。
 
-Each type that is being served by the Kubernetes API \(in this case, `Project` and `ProjectList`\) needs to implement the `k8s.io/apimachinery/pkg/runtime.Object` interface. This interface defines the two methods `GetObjectKind()` and `DeepCopyObject()`. The first method is already provided by the embedded `metav1.TypeMeta` struct; the second you’ll have to implement yourself.
+* {0,0}:网络号和主机号都全部为0，表示“本网络上的本主机”，只能用作源地址。
+* {0，host-id}:本网络上的某台主机。只能用作源地址。
+* {-1,-1}：表示网络号和主机号的所有位上都是1（二进制），用于本网络上的广播，只能用作目的地址，发到该地址的数据包不能转发到源地址所在网络之外。
+* {net-id,-1}:直接广播到指定的网络上。只能用作目的地址。
+* {net-id,subnet-id,-1}:直接广播到指定网络的指定子网络上。只用作目的地址。
+* {net-id,-1,-1}:直接广播到指定网络的所有子网络上。只能用作目的地址。
+* {127，}:即网络号为127的任意ip地址。都是内部主机回环地址\(loopback\),永远都不能出现在主机外部的网络中。
 
-The `DeepCopyObject` method is intended to generate a [deep copy](https://en.wikipedia.org/wiki/Object_copying#Deep_copy) of an object. Since this involves a lot of boilerplate code, these methods are often automatically generated. For the sake of this article, we’ll do it manually. Continue by adding a second file `deepcopy.go` to the same package:
+## 3. 问题解答
 
-```go
- package v1alpha1
- 
- import "k8s.io/apimachinery/pkg/runtime"
- 
- // DeepCopyInto copies all properties of this object into another object of the
- // same type that is provided as a pointer.
-func (in *Project) DeepCopyInto(out *Project) {
-     out.TypeMeta = in.TypeMeta
-     out.ObjectMeta = in.ObjectMeta
-     out.Spec = ProjectSpec{
-        Replicas: in.Spec.Replicas,
-     }
-}
- 
- // DeepCopyObject returns a generically typed copy of an object
- func (in *Project) DeepCopyObject() runtime.Object {
-     out := Project{}
-     in.DeepCopyInto(&out)
- 
-     return &out
- }
- 
- // DeepCopyObject returns a generically typed copy of an object
- func (in *ProjectList) DeepCopyObject() runtime.Object {
-     out := ProjectList{}
-     out.TypeMeta = in.TypeMeta
-     out.ListMeta = in.ListMeta
- 
-     if in.Items != nil {
-         out.Items = make([]Project, len(in.Items))
-         for i := range in.Items {
-             in.Items[i].DeepCopyInto(&out.Items[i])
-         }
-     }
- 
-   return &out
-}
-```
+接下来我们来看之前问过的问题：127.0.0.1和0.0.0.0地址的区别是什么？我们先来看下共同点：  
 
-#### Interlude: Generate the `DeepCopy` methods automatically <a id="interlude-generate-the-deepcopy-methods-automatically"></a>
 
-OK - you may have already noticed that defining all these various `DeepCopy` methods is not a lot of fun. There are many different tools and frameworks around to automatically generate these methods \(all with very different levels of documentation and overall maturity\). The one that I’ve found works best is the `controller-gen` tool, which is part of the [Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) framework:
+* 都属于特殊地址。
+* 都属于A类地址。
+* 都是IPV4地址。
 
-```bash
-$ go get -u github.com/kubernetes-sigs/controller-tools/cmd/controller-gen
-```
+接下来我们分别看下这两个地址：
 
-To use `controller-gen`, annotate your CRD types with a `+k8s:deepcopy-gen` annotation:
+### 0.0.0.0
 
-```go
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-type Project struct {
-    // ...
-}
+IPV4中，0.0.0.0地址被用于表示一个无效的，未知的或者不可用的目标。  
+\* 在服务器中，0.0.0.0指的是本机上的所有IPV4地址，如果一个主机有两个IP地址，192.168.1.1 和 10.1.2.1，并且该主机上的一个服务监听的地址是0.0.0.0,那么通过两个ip地址都能够访问该服务。  
+\* 在路由中，0.0.0.0表示的是默认路由，即当路由表中没有找到完全匹配的路由的时候所对应的路由。
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-type ProjectList struct {
-    // ...
-}
-```
+用途总结：
 
-Then, run `controller-gen object paths=./api/types/v1alpha1/project.go` to automatically generate the deepcopy methods.
+* 当一台主机还没有被分配一个IP地址的时候，用于表示主机本身。（DHCP分配IP地址的时候）
+* 用作默认路由，表示”任意IPV4主机”。
+* 用来表示目标机器不可用。
+* 用作服务端，表示本机上的任意IPV4地址。
 
-To make things even more easy, you could add a [`go:generate` statement](https://blog.golang.org/generate) to the entire file:
+### 127.0.0.1
 
-```go
-package v1alpha1
+`127.0.0.1`属于`{127,}`集合中的一个，而所有网络号为 127 的地址都被称之为`回环地址(loopback)`，所以`回环地址！=127.0.0.1`,它们是包含关系，即`回环地址包含127.0.0.1`。
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-//go:generate controller-gen object paths=$GOFILE
-
-// ...
-```
-
-Then, just run `go generate ./...` in your root directory to update the generated code.
-
-### Step 3: Register types at the scheme builder
-
-Next, you’ll need to make your new types known to the client library. This will allow the client to \(more or less\) automatically process your new types when communicating with the API server.
-
-For this, add a new file `register.go` to your package:
-
-```go
-package v1alpha1
-
-import (
-    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-    "k8s.io/apimachinery/pkg/runtime"
-    "k8s.io/apimachinery/pkg/runtime/schema"
-)
-
-const GroupName = "example.martin-helmich.de"
-const GroupVersion = "v1alpha1"
-
-var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: GroupVersion}
-
-var (
-    SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
-    AddToScheme   = SchemeBuilder.AddToScheme
-)
-
-func addKnownTypes(scheme *runtime.Scheme) error {
-    scheme.AddKnownTypes(SchemeGroupVersion,
-        &Project{},
-        &ProjectList{},
-    )
-
-    metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
-    return nil
-}
-```
-
-As you may notice, this code does not really do anything, yet \(except for creating a new `runtime.SchemeBuilder` instance\). The important part is the `AddToScheme` function \(line 16\), which is an exported struct member of the `runtime.SchemeBuilder` type created in line 15. You can call this function later from any part of your client code as soon as the Kubernetes client is initialized to register your type definitions.
-
-### Step 4: Build a HTTP client
-
-After defining types and adding a method to register them at the global scheme builder, you can now create a HTTP client that is capable of loading your custom resource.
-
-For this, add the following code to your package’s `main.go` file \(for now\):
-
-```go
- package main
- 
- import (
-     "flag"
-     "log"
-     "time"
- 
-     "k8s.io/apimachinery/pkg/runtime/schema"
-     "k8s.io/apimachinery/pkg/runtime/serializer"
- 
-     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
-     "k8s.io/client-go/kubernetes/scheme"
-     "k8s.io/client-go/rest"
-     "k8s.io/client-go/tools/clientcmd"
- )
- 
- var kubeconfig string
- 
- func init() {
-     flag.StringVar(&kubeconfig, "kubeconfig", "", "path to Kubernetes config file")
-     flag.Parse()
- }
- 
- func main() {
-     var config *rest.Config
-     var err error
- 
-     if kubeconfig == "" {
-         log.Printf("using in-cluster configuration")
-         config, err = rest.InClusterConfig()
-     } else {
-         log.Printf("using configuration from '%s'", kubeconfig)
-         config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-     }
- 
-     if err != nil {
-         panic(err)
-     }
- 
-     v1alpha1.AddToScheme(scheme.Scheme)
- 
-     crdConfig := *config
-     crdConfig.ContentConfig.GroupVersion = &schema.GroupVersion{Group: v1alpha1.GroupName, Version: v1alpha1.GroupVersion}
-     crdConfig.APIPath = "/apis"
-     crdConfig.NegotiatedSerializer = serializer.NewCodecFactory(scheme.Scheme)
-     crdConfig.UserAgent = rest.DefaultKubernetesUserAgent()
- 
-     exampleRestClient, err := rest.UnversionedRESTClientFor(&crdConfig)
-     if err != nil {
-         panic(err)
-     }
- }
-```
-
-You can now use the `exampleRestClient` created in line 48 to query all custom resources within the `example.martin-helmich.de/v1alpha1` API group. An example might look like this:
-
-```go
-result := v1alpha1.ProjectList{}
-err := exampleRestClient.
-    Get().
-    Resource("projects").
-    Do().
-    Into(&result)
-```
-
-In order to use your API in a more typesafe way, it is usually a good idea to wrap these operations within your own clientset. For this, create a new subpackage `clientset/v1alpha1`. To start, implement an interface that defines the types of your API group and move the configuration setup from your `main` method into that clientset’s constructor function \(`NewForConfig` in the example below\):
-
-```go
- package v1alpha1
- 
- import (
-     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
-     "k8s.io/apimachinery/pkg/runtime/schema"
-     "k8s.io/apimachinery/pkg/runtime/serializer"
-     "k8s.io/client-go/kubernetes/scheme"
-     "k8s.io/client-go/rest"
- )
- 
- type ExampleV1Alpha1Interface interface {
-     Projects(namespace string) ProjectInterface 
- }
- 
- type ExampleV1Alpha1Client struct {
-     restClient rest.Interface
- }
- 
- func NewForConfig(c *rest.Config) (*ExampleV1Alpha1Client, error) {
-     config := *c
-     config.ContentConfig.GroupVersion = &schema.GroupVersion{Group: v1alpha1.GroupName, Version: v1alpha1.GroupVersion}
-     config.APIPath = "/apis"
-     config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
-     config.UserAgent = rest.DefaultKubernetesUserAgent()
- 
-     client, err := rest.RESTClientFor(&config)
-     if err != nil {
-         return nil, err
-     }
- 
-     return &ExampleV1Alpha1Client{restClient: client}, nil
- }
- 
- func (c *ExampleV1Alpha1Client) Projects(namespace string) ProjectInterface {
-     return &projectClient{
-         restClient: c.restClient,
-         ns: namespace,
-     }
- }
-```
-
-The code below will not compile yet, as it’s still missing the `ProjectInterface` and `projectClient` types. We’ll get to those in a moment.
-
-The `ExampleV1Alpha1Interface` and its implementation, the `ExampleV1Alpha1Client` struct are now the central point of entry for accessing your custom resources. You can now easily create a new clientset in your `main.go` by simply calling `clientset, err := v1alpha1.NewForConfig(config)`.
-
-Next, you’ll need to implement a specific clientset for accessing the `Project` custom resource \(note that the example above already uses the `ProjectInterface` and `projectClient` types that we still need to supply\). Create a second file `projects.go` in the same package:
-
-```go
- package v1alpha1
- 
- import (
-     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
-     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-     "k8s.io/apimachinery/pkg/watch"
-     "k8s.io/client-go/kubernetes/scheme"
-     "k8s.io/client-go/rest"
- )
- 
- type ProjectInterface interface {
-     List(opts metav1.ListOptions) (*v1alpha1.ProjectList, error)
-     Get(name string, options metav1.GetOptions) (*v1alpha1.Project, error)
-     Create(*v1alpha1.Project) (*v1alpha1.Project, error)
-     Watch(opts metav1.ListOptions) (watch.Interface, error)
-     // ...
- }
- 
- type projectClient struct {
-     restClient rest.Interface
-     ns         string
- }
- 
- func (c *projectClient) List(opts metav1.ListOptions) (*v1alpha1.ProjectList, error) {
-     result := v1alpha1.ProjectList{}
-     err := c.restClient.
-         Get().
-         Namespace(c.ns).
-         Resource("projects").
-         VersionedParams(&opts, scheme.ParameterCodec).
-         Do().
-         Into(&result)
- 
-     return &result, err
- }
- 
- func (c *projectClient) Get(name string, opts metav1.GetOptions) (*v1alpha1.Project, error) {
-     result := v1alpha1.Project{}
-     err := c.restClient.
-         Get().
-         Namespace(c.ns).
-         Resource("projects").
-         Name(name).
-         VersionedParams(&opts, scheme.ParameterCodec).
-         Do().
-         Into(&result)
- 
-     return &result, err
- }
- 
- func (c *projectClient) Create(project *v1alpha1.Project) (*v1alpha1.Project, error) {
-     result := v1alpha1.Project{}
-     err := c.restClient.
-         Post().
-         Namespace(c.ns).
-         Resource("projects").
-         Body(project).
-         Do().
-         Into(&result)
- 
-     return &result, err
- }
- 
- func (c *projectClient) Watch(opts metav1.ListOptions) (watch.Interface, error) {
-     opts.Watch = true
-     return c.restClient.
-         Get().
-         Namespace(c.ns).
-         Resource("projects").
-         VersionedParams(&opts, scheme.ParameterCodec).
-         Watch()
- }
-```
-
-This client is obviously not yet complete and misses methods like `Delete`, `Update` and others. However, these can be implemented similar to the already existing methods. Have a look at the existing client sets \(for example, the [`Pod` client set](https://github.com/kubernetes/client-go/blob/master/kubernetes/typed/core/v1/pod.go)\) for inspiration.
-
-After creating your client set, using it to list your existing resources becomes quite easy:
-
-```go
-import clientV1alpha1 "github.com/martin-helmich/kubernetes-crd-example/clientset/v1alpha1"
-// ...
   
-func main() {
-     // ...
- 
-     clientSet, err := clientV1alpha1.NewForConfig(config)
-     if err != nil {
-         panic(err)
-     }
- 
-     projects, err := clientSet.Projects("default").List(metav1.ListOptions{})
-     if err != nil {
-         panic(err)
-     }
- 
-     fmt.Printf("projects found: %+v\n", projects)
-}
+回环地址：所有发往该类地址的数据包都应该被loop back。  
+
+
+**用途:**
+
+* 回环测试,通过使用ping 127.0.0.1 测试某台机器上的网络设备，操作系统或者TCP/IP实现是否工作正常。
+* DDos攻击防御：网站收到DDos攻击之后，将域名A记录到127.0.0.1，即让攻击者自己攻击自己。
+* 大部分Web容器测试的时候绑定的本机地址。
+* 监听仅能从本机进行访问的服务。
+
+### localhost
+
+相比127.0.0.1，localhost具有更多的意义。localhost是个域名，而不是一个ip地址。之所以我们经常把localhost与127.0.0.1认为是同一个是因为我们使用的大多数电脑上都讲localhost指向了127.0.0.1这个地址。  
+在ubuntu系统中，/ets/hosts文件中都会有如下内容：
+
+```text
+127.0.0.1   localhost127.0.1.1   jason-Lenovo-V3000# The following lines are desirable for IPv6 capable hosts::1     ip6-localhost ip6-loopbackfe00::0 ip6-localnetff00::0 ip6-mcastprefixff02::1 ip6-allnodesff02::2 ip6-allrouters
 ```
 
-### Step 5: Build an informer
+上面第一行是几乎每台电脑上都会有的默认配置。  
+但是localhost的意义并不局限于127.0.0.1。
 
-When building a Kubernetes Operator, you’ll typically want to be able to react on newly created or updated resources. In theory, you could just periodically call the `List()` method and check if new resources were added. In practice, this is a sub-optimal solution, especially when you have lots of these resources.
+localhost是一个域名，用于指代this computer或者this host,可以用它来获取运行在本机上的网络服务。  
+在大多数系统中，localhost被指向了IPV4的127.0.0.1和IPV6的::1。
 
-Most operators work by initially loading all relevant instances of a resource by using an initial `List()` call, and then subscribing to updates using a `Watch()` call. The initial object list and the updates received from the watch are then used to construct a local cache that allows quick access to any custom resources without having to hit the API server every time.
+```text
+127.0.0.1    localhost::1          localhost
+```
 
-This pattern is so common that the client-go library offers a helper for this: the _Informer_ from the `k8s.io/client-go/tools/cache` package. You can construct a new Informer for your custom resource as follows:
+所以，在使用的时候要注意确认IPV4还是IPV6
 
-```go
- package main
+## 4. 总结
+
+127.0.0.1 是一个环回地址。并不表示“本机”。0.0.0.0才是真正表示“本网络中的本机”。
+
   
- import (
-     "time"
- 
-     "github.com/martin-helmich/kubernetes-crd-example/api/types/v1alpha1"
-     client_v1alpha1 "github.com/martin-helmich/kubernetes-crd-example/clientset/v1alpha1"
-     metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-     "k8s.io/apimachinery/pkg/runtime"
-     "k8s.io/apimachinery/pkg/util/wait"
-     "k8s.io/apimachinery/pkg/watch"
-     "k8s.io/client-go/tools/cache"
- )
- 
- func WatchResources(clientSet client_v1alpha1.ExampleV1Alpha1Interface) cache.Store {
-     projectStore, projectController := cache.NewInformer(
-         &cache.ListWatch{
-             ListFunc: func(lo metav1.ListOptions) (result runtime.Object, err error) {
-                 return clientSet.Projects("some-namespace").List(lo)
-             },
-             WatchFunc: func(lo metav1.ListOptions) (watch.Interface, error) {
-                 return clientSet.Projects("some-namespace").Watch(lo)
-             },
-         },
-         &v1alpha1.Project{},
-         1*time.Minute,
-         cache.ResourceEventHandlerFuncs{},
-     )
- 
-     go projectController.Run(wait.NeverStop)
-     return projectStore
- }
-```
+在实际应用中，一般我们在服务端绑定端口的时候可以选择绑定到0.0.0.0，这样我的服务访问方就可以通过我的多个ip地址访问我的服务。
 
-The `NewInformer` method returns two objects: The second return value, the _controller_ controls the `List()` and `Watch()` calls and fills the first return value, the _store_ with a \(more or less\) recent cache of the watched resource’s state on the API server \(in this case, the _project_ CRD\).
+  
+比如我有一台服务器，一个外网地址A,一个内网地址B：
 
-You can now use the _store_ to easily access your CRDs, either listing them all or accessing them by name. Keep in mind that the store functions return generic `interface{}` types, so you’ll have to typecast them back to your CRD type:
+* 如果我绑定的端口指定了0.0.0.0，那么通过内网地址或外网地址都可以访问我的应用。
+* 如果我只绑定了内网地址B，那么通过外网地址A就不能访问。 
+* 如果我只绑定了127.0.0.1，那么就只能从本机通过 127.0.0.1 进行访问
 
-```go
-store := WatchResource(clientSet)
-project := store.GetByKey("some-namespace/some-project").(*v1alpha1.Project)
-```
+所以如果绑定0.0.0.0,也有一定安全隐患，对于只需要内网访问的服务，可以只绑定内网地址。
 
-## Conclusion
+## 5. 精彩回复
 
-Building clients for Custom Resources is something that is \(at least, currently\) only sparsely documented and can be a bit tricky at times.
+[neko77](https://juejin.cn/user/676954895039421)java攻城狮 \([https://juejin.cn/post/6844903886629634061](https://juejin.cn/post/6844903886629634061)\)
 
-A client library for your Custom Resource as shown in this article, along with a respective Informer is a good starting point for building your own Kubernetes operator that reacts on changes made to Custom Resources. Check the [Github project for this article](https://github.com/martin-helmich/kubernetes-crd-example) for a complete and working version.
+> 一间漆黑静谧的屋子里，突然出现了一个婴儿。 剧烈的啼哭传遍了各个角落（新机入网，ip：0.0.0.0 子网掩码 255.255.255.255 广播消息）
+>
+> DHCP1: w\(ﾟДﾟ\)w DHCP2：\(⊙ˍ⊙\) DHCP3: …… DHCP1暴起吆喝一句【刚才是谁叫我？!xxxxxx】 DHCP2悠悠的道【谁新上来了？xxxxxx】 \(DHCP查找合法地址，附在返回报文中\)
+>
+> 婴儿:【收到DHCP1的消息了，我似乎是192.168.1.248】 婴儿:【DHCP1 DHCP2 DHCP3大家好，我是练习时长达两年半的个人练习生，马上要成为192.168.1.248,喜欢……，】
+>
+> DHCP1,DHCP2,DHCP3【好了，好了，我们知道了，以后你就以192.168.1.248出道了】
+>
+> \(机器只接受最新达到的DHCP消息，拿到ip后并未修改，而是广播所有DHCP，收到ACK后机器再修改ip\)
 
 
 
-References
+## References
 
-* [Accessing Kubernetes CRDs from the client-go package](https://www.martin-helmich.de/en/blog/kubernetes-crd-client.html)
+* [原文地址 127.0.0.1和0.0.0.0地址的区别](http://blog.leanote.com/post/medusar/7e371ca28621) 1. [https://en.wikipedia.org/wiki/0.0.0.0](https://en.wikipedia.org/wiki/0.0.0.0) 2. [http://www.howtogeek.com/225487/what-is-the-difference-between-127.0.0.1-and-0.0.0.0/](http://www.howtogeek.com/225487/what-is-the-difference-between-127.0.0.1-and-0.0.0.0/) 3. [http://www.tech-faq.com/127-0-0-1.html](http://www.tech-faq.com/127-0-0-1.html) 4. [http://tools.ietf.org/html/rfc3330](http://tools.ietf.org/html/rfc3330) 5. [http://tools.ietf.org/html/rfc1700](http://tools.ietf.org/html/rfc1700) 6. [https://en.wikipedia.org/wiki/Localhost](https://en.wikipedia.org/wiki/Localhost)
 
